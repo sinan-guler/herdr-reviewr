@@ -816,10 +816,10 @@ fn the_expansion_aligns_row_one_into_the_labeled_grid() {
     assert_eq!(at(&go_line, "go"), at(&move_line, "move"), "labels share a gutter column");
     assert_eq!(
         at(&do_line, "c comment"),
-        at(&go_line, "u/b/t"),
+        at(&go_line, "u/i/b/t"),
         "the primary aligns under the same column as the band keys"
     );
-    assert_eq!(at(&go_line, "u/b/t"), at(&move_line, "j k"), "band keys align in one column");
+    assert_eq!(at(&go_line, "u/i/b/t"), at(&move_line, "j k"), "band keys align in one column");
 }
 
 #[test]
@@ -3703,7 +3703,7 @@ fn the_commits_header_names_the_pick_and_its_verdict() {
     );
     app.keys_expanded = true;
     let expanded = render(&app);
-    assert!(expanded.contains("u/b/t/g scope"), "the go band names four scopes:\n{expanded}");
+    assert!(expanded.contains("u/i/b/t/g scope"), "the go band names five scopes:\n{expanded}");
     assert!(expanded.contains("G commits"), "and the picker key:\n{expanded}");
     app.keys_expanded = false;
 
@@ -3756,7 +3756,7 @@ fn the_commits_header_names_the_pick_and_its_verdict() {
     );
     let footer = footer_line(&out);
     assert!(footer.trim_start().starts_with("G commits"), "{footer}");
-    assert!(footer.contains("u/b/t scope"), "the other three scopes: {footer}");
+    assert!(footer.contains("u/i/b/t scope"), "the other four scopes: {footer}");
 }
 
 #[test]

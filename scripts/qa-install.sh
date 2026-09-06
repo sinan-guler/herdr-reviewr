@@ -8,7 +8,7 @@ NEW="target/release/herdr-reviewr"
 
 # Locate the managed plugin install. Exactly one is expected.
 shopt -s nullglob
-roots=("$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-*)
+roots=("$HOME"/.config/herdr/plugins/github/sinan-guler.reviewr-*)
 shopt -u nullglob
 [ ${#roots[@]} -eq 1 ] || {
   echo "qa-install: expected one installed plugin, found ${#roots[@]}:" >&2

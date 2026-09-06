@@ -53,7 +53,7 @@ auto_open=$(cfg_field auto_open) || unreadable_config
 # invocation knows the real root. Best effort — never
 # fails an action, and never replaces anything but a symlink.
 if [ -n "${HERDR_PLUGIN_ROOT:-}" ] && [ -x "$HERDR_PLUGIN_ROOT/bin/herdr-reviewr" ]; then
-  for link_dir in "$HOME/.local/state/herdr/plugins/persiyanov.reviewr/bin" "$HOME/.local/bin"; do
+  for link_dir in "$HOME/.local/state/herdr/plugins/sinan-guler.reviewr/bin" "$HOME/.local/bin"; do
     if [ "$link_dir" = "$HOME/.local/bin" ] && [ ! -d "$link_dir" ]; then
       continue
     fi
@@ -274,7 +274,7 @@ overlay)
   ;;
 esac
 
-open_json=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-persiyanov.reviewr}" --entrypoint pane \
+open_json=$("$H" plugin pane open --plugin "${HERDR_PLUGIN_ID:-sinan-guler.reviewr}" --entrypoint pane \
   "$@" --cwd "$cwd" "$focus" 2>/dev/null)
 new=$(printf '%s' "$open_json" | jq -r '.result.plugin_pane.pane.pane_id // empty' 2>/dev/null)
 [ -n "$new" ] || refuse "herdr plugin pane open failed"

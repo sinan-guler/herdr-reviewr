@@ -19,6 +19,7 @@ pub enum Action {
     HalfUp,
     HalfDown,
     ScopeUncommitted,
+    ScopeUnstaged,
     ScopeBranch,
     ScopeLastTurn,
     ScopeCommits,
@@ -34,6 +35,8 @@ pub enum Action {
     NavigatorGrow,
     NavigatorShrink,
     Select,
+    Stage,
+    Unstage,
     Comment,
     Edit,
     Delete,
@@ -156,7 +159,7 @@ impl Key {
 
 /// Every action with its config name and default keys — the single source the default keymap,
 /// the name lookup, and the config error message are built from.
-const ACTIONS: [(Action, &str, &[Key]); 42] = [
+const ACTIONS: [(Action, &str, &[Key]); 45] = [
     (Action::Down, "down", &[Key::plain('j'), Key::named(KeyCode::Down)]),
     (Action::Up, "up", &[Key::plain('k'), Key::named(KeyCode::Up)]),
     (Action::NextHunk, "next-hunk", &[Key::plain(']')]),
@@ -170,6 +173,10 @@ const ACTIONS: [(Action, &str, &[Key]); 42] = [
     (Action::HalfUp, "half-up", &[Key::ctrl('u')]),
     (Action::HalfDown, "half-down", &[Key::ctrl('d')]),
     (Action::ScopeUncommitted, "scope-uncommitted", &[Key::plain('u')]),
+    // `i` for the index: this scope is the index against the worktree. Not `U`, which sits
+    // one shift away from `u` and would read as a variant of `uncommitted` rather than a
+    // different question.
+    (Action::ScopeUnstaged, "scope-unstaged", &[Key::plain('i')]),
     (Action::ScopeBranch, "scope-branch", &[Key::plain('b')]),
     (Action::ScopeLastTurn, "scope-last-turn", &[Key::plain('t')]),
     (Action::ScopeCommits, "scope-commits", &[Key::plain('g')]),
@@ -185,6 +192,10 @@ const ACTIONS: [(Action, &str, &[Key]); 42] = [
     (Action::NavigatorGrow, "navigator-grow", &[Key::plain('<')]),
     (Action::NavigatorShrink, "navigator-shrink", &[Key::plain('>')]),
     (Action::Select, "select", &[Key::plain('v')]),
+    // `a` for git's own `add`. Two actions rather than one toggle: on a partly-marked file a
+    // toggle has no obvious meaning — stage the rest, or drop the mark entirely?
+    (Action::Stage, "stage", &[Key::plain('a')]),
+    (Action::Unstage, "unstage", &[Key::plain('A')]),
     (Action::Comment, "comment", &[Key::plain('c')]),
     (Action::Edit, "edit", &[Key::plain('e')]),
     (Action::Delete, "delete", &[Key::plain('d')]),

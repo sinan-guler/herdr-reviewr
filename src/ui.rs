@@ -27,7 +27,7 @@ use crate::forge;
 use crate::git;
 use crate::herdr::AgentChoice;
 use crate::keymap::Keymap;
-use crate::model::Comment;
+use crate::model::{Comment, Staged};
 use crate::snippet::{snippet_caption_sign, snippet_row_is_comment};
 use crate::theme::Palette;
 
@@ -1567,13 +1567,16 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(p.dim0).add_modifier(Modifier::BOLD)
                     };
                     let spans = vec![
+                        // The review column runs down the whole pane, so a directory holds
+                        // it blank rather than sliding its subtree out of the grid.
+                        Span::raw(REVIEW_BLANK),
                         Span::styled(format!("{nest}{arrow}"), Style::default().fg(p.dim2)),
                         Span::styled(format!("{}/", row.name), name_style),
                     ];
                     selectable_row(p, spans, width, fill)
                 }
                 RowKind::File { annotation, .. } => {
-                    // Unchanged files have no marker. Two spaces hold the chevron's
+                    // Unchanged files have no change marker. Two spaces hold the chevron's
                     // column so the name lines up with a sibling directory.
                     let indent = if annotation.is_some() { nest } else { format!("{nest}  ") };
                     file_row_item(
@@ -1594,6 +1597,10 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
     frame.render_widget(List::new(items), inner);
 }
+
+/// The review column's width, held blank by every row that has no mark to show, so the
+/// file tree keeps one grid whatever each row carries.
+const REVIEW_BLANK: &str = "  ";
 
 /// The fields [`file_row_item`] renders. `emphasis` byte ranges into `name` wear the match
 /// highlight (the search screen's matched characters); a head-elided name remaps them onto the
@@ -1622,10 +1629,21 @@ fn file_row_item(
     let (additions, deletions) = annotation.map_or((0, 0), |a| (a.additions, a.deletions));
     let stats = stats_str(additions, deletions);
     let gap = if stats.is_empty() { 0 } else { 2 };
-    let fixed = indent.width() + marker.width() + stats.width() + gap;
+    let fixed = REVIEW_BLANK.len() + indent.width() + marker.width() + stats.width() + gap;
     let shown = elide_head(name, width.saturating_sub(fixed).max(1));
 
-    let mut spans = vec![Span::styled(indent.to_string(), text_style(p))];
+    // The review mark sits ahead of the tree indent, in a column of its own that every row
+    // holds — directories and unreviewed files included. Inside the indent it would push
+    // each name two cells right and break the alignment the tree is drawn on; out here it
+    // reads down the pane as review progress, and nothing else moves.
+    let mut spans = match annotation {
+        Some(a) => vec![Span::styled(
+            format!("{} ", a.staged.marker()),
+            Style::default().fg(review_color(p, a.staged)),
+        )],
+        None => vec![Span::raw(REVIEW_BLANK)],
+    };
+    spans.push(Span::styled(indent.to_string(), text_style(p)));
     if let Some(a) = annotation {
         spans.push(Span::styled(marker, Style::default().fg(kind_color(p, a.change.marker()))));
     }
@@ -2549,14 +2567,18 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
         }
         A::Scope => (
             format!(
-                "{}/{}/{}/{}",
+                "{}/{}/{}/{}/{}",
                 hint(K::ScopeUncommitted),
+                hint(K::ScopeUnstaged),
                 hint(K::ScopeBranch),
                 hint(K::ScopeLastTurn),
                 hint(K::ScopeCommits)
             ),
             "scope",
         ),
+        // A wholly-marked file offers the way back; every other state offers the mark.
+        A::ReviewMark if app.review_mark_set() => (hint(K::Unstage), "unmark"),
+        A::ReviewMark => (hint(K::Stage), "reviewed"),
         A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
         A::List => (hint(K::Comments), "comments"),
         A::Copy => (hint(K::Copy), "copy"),
@@ -2583,6 +2605,7 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             use crate::model::Scope;
             let others: Vec<String> = [
                 (Scope::Uncommitted, K::ScopeUncommitted),
+                (Scope::Unstaged, K::ScopeUnstaged),
                 (Scope::Branch, K::ScopeBranch),
                 (Scope::LastTurn, K::ScopeLastTurn),
                 (Scope::Commits, K::ScopeCommits),
@@ -4639,6 +4662,17 @@ fn dim_paragraph<'a>(text: &'a str, p: &Palette) -> Paragraph<'a> {
 }
 
 /// The theme accent for a change marker, matched to the diff's add/remove hues.
+/// The review mark's colour: green once a file is wholly reviewed, amber while the mark is
+/// half-applied, and the receding dim for a file not yet looked at — so a glance down the
+/// list reads as progress rather than as four more change kinds.
+fn review_color(p: &Palette, staged: Staged) -> Color {
+    match staged {
+        Staged::Yes => p.green,
+        Staged::Partial => p.yellow,
+        Staged::No => p.dim2,
+    }
+}
+
 fn kind_color(p: &Palette, marker: char) -> Color {
     match marker {
         'A' | '?' => p.green,

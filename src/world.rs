@@ -127,12 +127,23 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
     if !git::is_repo(&input.repo) {
         return Ok(plain(Vec::new()));
     }
+    // The review mark is read here, not inside `git::changed_files`, for two reasons: this
+    // is the one place the scope is already known, so `commits` — where both sides are
+    // committed trees and the index means nothing — skips the two extra git calls; and
+    // every path out of here runs on the world worker or an already-blessed synchronous
+    // rebuild, so the mark never costs a keystroke.
+    let marked = |mut changed: Vec<ChangedFile>| -> Result<Vec<ChangedFile>> {
+        git::mark_staged(&input.repo, &mut changed)?;
+        Ok(changed)
+    };
     match input.scope {
         Scope::LastTurn => match input.turn_baseline.as_deref() {
-            Some(t) => Ok(plain(git::changed_against_tree(&input.repo, t)?)),
+            Some(t) => Ok(plain(marked(git::changed_against_tree(&input.repo, t)?)?)),
             None => Ok(plain(Vec::new())),
         },
-        Scope::Uncommitted => Ok(plain(git::changed_files(&input.repo, input.scope, None)?)),
+        Scope::Uncommitted | Scope::Unstaged => {
+            Ok(plain(marked(git::changed_files(&input.repo, input.scope, None)?)?))
+        }
         Scope::Branch => {
             // A resolve failure fails the build whole, so the landing keeps the stale
             // frame and reports — degrading to an empty snapshot would blank a populated
@@ -141,7 +152,8 @@ pub fn build_changed(input: &WorldInput) -> Result<ScopeBuild> {
             let resolution = git::resolve_base(&input.repo, input.base.as_deref())
                 .map_err(|e| anyhow::anyhow!("{}", e.0))?;
             let base_oid = resolution.status.winner.as_ref().map(|w| w.oid().to_string());
-            let changed = git::changed_files(&input.repo, input.scope, base_oid.as_deref())?;
+            let changed =
+                marked(git::changed_files(&input.repo, input.scope, base_oid.as_deref())?)?;
             Ok(ScopeBuild { branch_base: resolution.status, pick_status: None, changed })
         }
         Scope::Commits => {

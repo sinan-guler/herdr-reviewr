@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::hash::BuildHasher;
 
-use crate::model::{ChangeKind, ChangedFile};
+use crate::model::{ChangeKind, ChangedFile, Staged};
 
 /// A visible row of the flattened tree: a directory or a file.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -39,13 +39,16 @@ pub struct Annotation {
     pub change: ChangeKind,
     pub additions: u32,
     pub deletions: u32,
+    /// The reviewer's own review mark, carried so the navigator, the `All files` tree, and
+    /// the search screen all paint it from one source.
+    pub staged: Staged,
 }
 
 impl From<&ChangedFile> for Annotation {
     /// The scope annotation a changed file carries — the one mapping, shared by the `Changes`
     /// entry build and `app.rs`'s changeset map so a new field can't be wired in one and missed.
     fn from(f: &ChangedFile) -> Self {
-        Self { change: f.kind, additions: f.additions, deletions: f.deletions }
+        Self { change: f.kind, additions: f.additions, deletions: f.deletions, staged: f.staged }
     }
 }
 
@@ -215,7 +218,7 @@ fn join(prefix: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{Annotation, Entry, RowKind, build};
-    use crate::model::{ChangeKind, ChangedFile};
+    use crate::model::{ChangeKind, ChangedFile, Staged};
     use std::collections::HashSet;
 
     fn file(path: &str) -> ChangedFile {
@@ -225,6 +228,7 @@ mod tests {
             additions: 1,
             deletions: 0,
             previous_path: None,
+            staged: Staged::default(),
         }
     }
 

@@ -8,7 +8,7 @@ You need Rust (the exact toolchain is pinned by `rust-toolchain.toml` and instal
 first build) and [`just`](https://github.com/casey/just).
 
 ```bash
-git clone https://github.com/persiyanov/herdr-reviewr
+git clone https://github.com/sinan-guler/herdr-reviewr
 cd herdr-reviewr
 just test          # the test suite
 just run           # run reviewr against this repo

@@ -43,7 +43,7 @@ qa-install:
 qa-restore:
     #!/usr/bin/env sh
     set -eu
-    bin="$(ls -d "$HOME"/.config/herdr/plugins/github/persiyanov.reviewr-*/bin/herdr-reviewr | head -1)"
+    bin="$(ls -d "$HOME"/.config/herdr/plugins/github/sinan-guler.reviewr-*/bin/herdr-reviewr | head -1)"
     ./scripts/swap-binary.sh "$bin.release-backup" "$bin"
     echo "restored release binary at $bin"
 

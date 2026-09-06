@@ -462,7 +462,7 @@ fn an_action_repoints_the_stable_launch_paths_at_the_live_plugin_root() {
 
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let state_link =
-        home.path().join(".local/state/herdr/plugins/persiyanov.reviewr/bin/herdr-reviewr");
+        home.path().join(".local/state/herdr/plugins/sinan-guler.reviewr/bin/herdr-reviewr");
     assert_eq!(fs::read_link(&state_link).unwrap(), root.path().join("bin/herdr-reviewr"));
     let bin_link = home.path().join(".local/bin/herdr-reviewr");
     assert!(!bin_link.exists(), "~/.local/bin must not be created for the link");

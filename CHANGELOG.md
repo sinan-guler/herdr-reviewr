@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.37.0] — 2026-09-06
+
+### Added
+- **Mark files reviewed with `a`, unmark with `A`.** The mark is `git add`: reviewr stages the
+  file, and a column at the left of the file list shows where you are — `✓` reviewed, `◐`
+  reviewed but changed again since, blank not yet looked at. Marking never touches file
+  contents, branches, `HEAD`, or the committed tree, and nothing is committed for you.
+- **`unstaged` scope, on `i`.** The working tree against the index: everything you have not
+  marked reviewed yet. Files leave the list as you mark them, so it works as a review queue,
+  and a file you already marked comes back carrying only what arrived after the mark.
+
+### Changed
+- **The "no writes" guarantee is now "no content writes".** reviewr still never edits your
+  files, moves a branch, or commits, and every read path still writes nothing. It does now
+  write git's index — only under your own `stage`/`unstage` keypress, and only whole paths.
+
 ## [0.36.2] — 2026-08-29
 
 ### Fixed

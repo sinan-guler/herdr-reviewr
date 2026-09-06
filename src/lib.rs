@@ -1890,12 +1890,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent, area: Rect, keymap: &Keymap) -> 
             K::NavigatorGrow => app.resize_navigator(4),
             K::NavigatorShrink => app.resize_navigator(-4),
             K::ScopeUncommitted => app.set_scope(Scope::Uncommitted)?,
+            K::ScopeUnstaged => app.set_scope(Scope::Unstaged)?,
             K::ScopeBranch => app.set_scope(Scope::Branch)?,
             K::ScopeLastTurn => app.set_scope(Scope::LastTurn)?,
             K::ScopeCommits => app.set_scope(Scope::Commits)?,
             K::BasePick => app.open_base_picker(),
             K::CommitPick => app.open_commit_picker(),
             K::Select => app.toggle_select(),
+            // The review mark. Both resolve their file the way `edit` does, so they work
+            // from either pane, and both are inert on a directory row.
+            K::Stage => app.stage_selected(),
+            K::Unstage => app.unstage_selected(),
             K::Comment => app.start_comment(),
             // `edit`/`delete` act on the comment under the diff cursor, so they only fire with
             // the diff focused — otherwise `delete` would silently drop a comment under an

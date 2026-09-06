@@ -9,10 +9,11 @@ use common::Repo;
 use herdr_reviewr::git::{
     ResolvedBase, abbreviate_oid, all_files, changed_against_tree,
     changed_files as changed_files_oid, default_branch_name, file_content, list_branches,
-    merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base, resolve_commit,
-    snapshot_worktree, write_base_pick, write_baseline_ref,
+    mark_staged, merge_base as merge_base_oid, read_base_pick, read_baseline_ref, resolve_base,
+    resolve_commit, snapshot_worktree, stage_paths, staged_state, unmerged_paths, unstage_paths,
+    write_base_pick, write_baseline_ref,
 };
-use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope};
+use herdr_reviewr::model::{ChangeKind, ChangedFile, Scope, Staged};
 
 fn by_path(files: &[ChangedFile]) -> HashMap<&str, &ChangedFile> {
     files.iter().map(|f| (f.path.as_str(), f)).collect()
@@ -1098,4 +1099,249 @@ fn the_commit_scope_writes_nothing() {
         r.git(&["write-tree"]),
     );
     assert_eq!(before, after, "no ref, index, worktree, or HEAD change");
+}
+
+// --- the review mark (stage / unstage) ------------------------------------------------
+
+/// The changeset for a scope, with every file's review mark filled in — what the world
+/// worker hands the navigator.
+fn marked_files(repo: &Path, scope: Scope) -> Vec<ChangedFile> {
+    let mut files = changed_files(repo, scope, None).unwrap();
+    mark_staged(repo, &mut files).unwrap();
+    files
+}
+
+#[test]
+fn staging_marks_a_file_reviewed_and_unstaging_takes_it_back() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "two\n");
+
+    let files = marked_files(r.path(), Scope::Uncommitted);
+    assert_eq!(by_path(&files)["a.rs"].staged, Staged::No, "untouched is unreviewed");
+
+    stage_paths(r.path(), &["a.rs"]).unwrap();
+    let files = marked_files(r.path(), Scope::Uncommitted);
+    assert_eq!(by_path(&files)["a.rs"].staged, Staged::Yes);
+
+    unstage_paths(r.path(), &["a.rs"]).unwrap();
+    let files = marked_files(r.path(), Scope::Uncommitted);
+    assert_eq!(by_path(&files)["a.rs"].staged, Staged::No);
+}
+
+#[test]
+fn a_file_changed_after_its_mark_reads_partial() {
+    // The signal the whole feature turns on: "I reviewed this, and the agent has since
+    // touched it again."
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "two\n");
+    stage_paths(r.path(), &["a.rs"]).unwrap();
+    r.write("a.rs", "two\nthree\n");
+
+    let files = marked_files(r.path(), Scope::Uncommitted);
+    assert_eq!(by_path(&files)["a.rs"].staged, Staged::Partial);
+}
+
+#[test]
+fn a_path_holding_glob_characters_marks_only_itself() {
+    // Pathspecs are globs by default, so `lit[ab].txt` would otherwise also stage
+    // `lita.txt` — marking a file the reviewer never opened.
+    let r = Repo::init();
+    r.write("lit[ab].txt", "x\n");
+    r.write("lita.txt", "y\n");
+    r.commit_all("init");
+    r.write("lit[ab].txt", "x2\n");
+    r.write("lita.txt", "y2\n");
+
+    stage_paths(r.path(), &["lit[ab].txt"]).unwrap();
+
+    let files = marked_files(r.path(), Scope::Uncommitted);
+    let files = by_path(&files);
+    assert_eq!(files["lit[ab].txt"].staged, Staged::Yes);
+    assert_eq!(files["lita.txt"].staged, Staged::No, "the glob must not reach a sibling");
+}
+
+#[test]
+fn a_rename_marked_on_both_paths_completes() {
+    // Staging only the new path leaves the old path's deletion unstaged, which would read
+    // as `Partial` forever — the mark could never complete on a renamed file.
+    let r = Repo::init();
+    r.write("old.txt", "content\n");
+    r.commit_all("init");
+    r.git(&["mv", "old.txt", "new.txt"]);
+    r.git(&["reset", "-q"]);
+
+    stage_paths(r.path(), &["new.txt"]).unwrap();
+    assert_eq!(
+        staged_state(r.path(), &["new.txt", "old.txt"]).unwrap(),
+        Staged::Partial,
+        "the new path alone leaves the deletion behind"
+    );
+
+    stage_paths(r.path(), &["new.txt", "old.txt"]).unwrap();
+    assert_eq!(staged_state(r.path(), &["new.txt", "old.txt"]).unwrap(), Staged::Yes);
+}
+
+#[test]
+fn unstaging_works_in_a_repo_with_no_commits() {
+    // `restore --staged` resolves its pathspec against HEAD, so it fails outright here;
+    // `rm --cached` is the exact inverse when every index entry is a fresh addition.
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    stage_paths(r.path(), &["a.rs"]).unwrap();
+    assert_eq!(staged_state(r.path(), &["a.rs"]).unwrap(), Staged::Yes);
+
+    unstage_paths(r.path(), &["a.rs"]).unwrap();
+
+    assert_eq!(staged_state(r.path(), &["a.rs"]).unwrap(), Staged::No);
+    assert_eq!(r.git(&["status", "--porcelain"]).trim(), "?? a.rs", "back to untracked");
+    assert_eq!(
+        std::fs::read_to_string(r.path().join("a.rs")).unwrap(),
+        "one\n",
+        "unstaging never touches content"
+    );
+}
+
+#[test]
+fn the_review_mark_changes_the_index_and_nothing_else() {
+    // The narrowed "No content writes" invariant: staging moves the index, and leaves the
+    // worktree, HEAD, and every ref exactly as they were.
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "two\n");
+
+    let index_before = r.git(&["ls-files", "--stage"]);
+    let before = (
+        r.git(&["for-each-ref"]),
+        r.git(&["rev-parse", "HEAD"]),
+        r.git(&["rev-parse", "HEAD^{tree}"]),
+        std::fs::read_to_string(r.path().join("a.rs")).unwrap(),
+    );
+
+    stage_paths(r.path(), &["a.rs"]).unwrap();
+
+    assert_ne!(index_before, r.git(&["ls-files", "--stage"]), "the index moved");
+    let after = (
+        r.git(&["for-each-ref"]),
+        r.git(&["rev-parse", "HEAD"]),
+        r.git(&["rev-parse", "HEAD^{tree}"]),
+        std::fs::read_to_string(r.path().join("a.rs")).unwrap(),
+    );
+    assert_eq!(before, after, "no ref, HEAD, committed tree, or file-content change");
+    // Nothing was committed away: the edit is still there to review against HEAD.
+    assert_eq!(r.git(&["diff", "HEAD", "--name-only"]).trim(), "a.rs");
+}
+
+#[test]
+fn an_unmerged_path_is_reported_so_the_mark_can_refuse() {
+    // Staging an unmerged path resolves the conflict, and the row gives no hint that it
+    // would: `parse_name_status` folds `U` into an ordinary `Modified`.
+    let r = Repo::init();
+    r.write("c.txt", "base\n");
+    r.commit_all("init");
+    r.git(&["checkout", "-q", "-b", "other"]);
+    r.write("c.txt", "other\n");
+    r.commit_all("other");
+    r.git(&["checkout", "-q", "main"]);
+    r.write("c.txt", "main\n");
+    r.commit_all("main");
+    // The merge is expected to conflict, so it is not asserted successful.
+    let _ =
+        std::process::Command::new("git").arg("-C").arg(r.path()).args(["merge", "other"]).output();
+
+    let unmerged = unmerged_paths(r.path()).unwrap();
+    assert!(unmerged.contains("c.txt"), "the conflicted path is reported: {unmerged:?}");
+
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    assert_eq!(
+        by_path(&files)["c.txt"].kind,
+        ChangeKind::Modified,
+        "and it looks like an ordinary edit, which is why the probe is needed"
+    );
+}
+
+#[test]
+fn a_clean_repo_reports_no_unmerged_paths() {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    assert!(unmerged_paths(r.path()).unwrap().is_empty());
+}
+
+// --- the `unstaged` scope --------------------------------------------------------------
+
+#[test]
+fn the_unstaged_scope_is_the_review_queue() {
+    let r = Repo::init();
+    r.write("reviewed.rs", "one\n");
+    r.write("pending.rs", "one\n");
+    r.commit_all("init");
+    r.write("reviewed.rs", "two\n");
+    r.write("pending.rs", "two\n");
+    r.write("fresh.rs", "new\n"); // untracked: never reviewed
+
+    stage_paths(r.path(), &["reviewed.rs"]).unwrap();
+
+    let files = marked_files(r.path(), Scope::Unstaged);
+    let files = by_path(&files);
+    assert!(!files.contains_key("reviewed.rs"), "a marked file leaves the queue");
+    assert_eq!(files["pending.rs"].kind, ChangeKind::Modified);
+    assert_eq!(
+        files["fresh.rs"].kind,
+        ChangeKind::Untracked,
+        "a file git was never told about cannot have been reviewed"
+    );
+}
+
+#[test]
+fn the_unstaged_scope_shows_only_what_arrived_after_the_mark() {
+    // The old side is the index, so a file reviewed and then edited again returns carrying
+    // only the part that came after the mark — not the whole change against HEAD.
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "one\ntwo\n");
+    stage_paths(r.path(), &["a.rs"]).unwrap();
+    r.write("a.rs", "one\ntwo\nthree\n");
+
+    let files = marked_files(r.path(), Scope::Unstaged);
+    let a = by_path(&files)["a.rs"];
+    assert_eq!(a.additions, 1, "only the line added since the mark");
+    assert_eq!(a.staged, Staged::Partial);
+
+    // Against HEAD the same file still carries both lines.
+    let files = changed_files(r.path(), Scope::Uncommitted, None).unwrap();
+    assert_eq!(by_path(&files)["a.rs"].additions, 2);
+}
+
+#[test]
+fn the_index_is_the_old_side_of_the_unstaged_scope() {
+    let r = Repo::init();
+    r.write("a.rs", "committed\n");
+    r.commit_all("init");
+    r.write("a.rs", "reviewed\n");
+    stage_paths(r.path(), &["a.rs"]).unwrap();
+    r.write("a.rs", "latest\n");
+
+    // `git show :<path>` — what `content_sides` reads for this scope.
+    assert_eq!(file_content(r.path(), "", "a.rs"), "reviewed\n");
+    // A path the index does not hold reads empty, so an untracked file draws all-insertion.
+    assert_eq!(file_content(r.path(), "", "absent.rs"), "");
+}
+
+#[test]
+fn the_commits_scope_carries_no_review_mark() {
+    // Both sides are committed trees there, so the index says nothing about them.
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "two\n");
+    stage_paths(r.path(), &["a.rs"]).unwrap();
+
+    let files = changed_files(r.path(), Scope::Commits, None).unwrap();
+    assert!(files.is_empty(), "the commits scope diffs through its own entry point");
 }

@@ -359,9 +359,10 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
             path,
             "default_scope",
             value,
-            "one of uncommitted, branch, last-turn",
+            "one of uncommitted, unstaged, branch, last-turn",
         )? {
             "uncommitted" => crate::model::Scope::Uncommitted,
+            "unstaged" => crate::model::Scope::Unstaged,
             "branch" => crate::model::Scope::Branch,
             "last-turn" => crate::model::Scope::LastTurn,
             // `commits` needs a pick the pane does not yet hold, so it is not a start scope
@@ -370,7 +371,7 @@ fn parse_plugin_config(path: &Path) -> Result<PluginConfig, PluginConfigError> {
                 return Err(value_error(
                     path,
                     "default_scope",
-                    "one of uncommitted, branch, last-turn",
+                    "one of uncommitted, unstaged, branch, last-turn",
                 ));
             }
         };

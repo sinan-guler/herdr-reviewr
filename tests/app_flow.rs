@@ -13,7 +13,7 @@ use herdr_reviewr::config::NavigatorPosition;
 use herdr_reviewr::export::ExportTarget;
 use herdr_reviewr::herdr::{AgentChoice, AgentSample};
 use herdr_reviewr::keymap::{Action, Key, KeyCode as BindingCode, Keymap};
-use herdr_reviewr::model::{Scope, Side};
+use herdr_reviewr::model::{Scope, Side, Staged};
 use herdr_reviewr::turn::Status;
 use herdr_reviewr::{handle_key, handle_mouse};
 use ratatui::crossterm::event::{
@@ -7423,4 +7423,161 @@ fn all_files_marks_the_run_and_lists_the_worktree() {
         app.entries.iter().filter(|e| e.annotation.is_some()).map(|e| e.path.as_str()).collect();
     assert_eq!(marked, ["three.rs"], "only the run's files carry a mark");
     assert!(app.entries.iter().any(|e| e.path == "root.rs"), "the tree lists the worktree");
+}
+
+// --- the review mark ------------------------------------------------------------------
+
+/// The review mark the navigator would paint for `path`, read from the same entries the
+/// renderer walks; `None` once the file has left the active changeset.
+fn mark_of(app: &App, path: &str) -> Option<Staged> {
+    app.entries
+        .iter()
+        .find(|e| e.path == path)
+        .and_then(|e| e.annotation.as_ref())
+        .map(|a| a.staged)
+}
+
+/// A repo with one committed file the worktree has since edited.
+fn review_repo() -> Repo {
+    let r = Repo::init();
+    r.write("a.rs", "one\n");
+    r.write("b.rs", "one\n");
+    r.commit_all("init");
+    r.write("a.rs", "two\n");
+    r.write("b.rs", "two\n");
+    r
+}
+
+#[test]
+fn the_stage_key_marks_the_file_under_the_cursor_reviewed() {
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    let marked = r.git(&["diff", "--cached", "--name-only"]);
+    assert_eq!(marked.trim(), "a.rs", "only the cursor's file");
+    assert!(app.status.contains("reviewed"), "status says so: {}", app.status);
+    // The mark is on screen in the same frame as the write, not a refresh later.
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::Yes));
+    assert!(app.review_mark_set(), "the footer now offers the way back");
+}
+
+#[test]
+fn the_unstage_key_takes_the_mark_back_off() {
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    press(&mut app, &keymap, KeyCode::Char('A'));
+
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "");
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::No));
+    assert!(!app.review_mark_set());
+}
+
+#[test]
+fn marking_a_file_drops_it_from_the_unstaged_scope() {
+    // The workflow the scope exists for: the queue drains as the reviewer works.
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('i'));
+    assert_eq!(app.scope, Scope::Unstaged);
+    assert_eq!(app.changed_count(), 2, "both files await review");
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    common::land_world(&mut app);
+
+    assert_eq!(app.changed_count(), 1, "the reviewed file left the queue");
+    assert_eq!(mark_of(&app, "a.rs"), None);
+    assert!(mark_of(&app, "b.rs").is_some());
+}
+
+#[test]
+fn the_review_keys_are_inert_in_the_commits_scope() {
+    // Both sides are committed trees there, so `git add` would stage worktree content the
+    // reviewer is not looking at.
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    // Set directly: `set_scope` with no pick opens the commit picker instead of switching,
+    // and the picker would swallow the keypress before the guard is reached.
+    app.scope = Scope::Commits;
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "", "nothing staged");
+    assert!(app.status.contains("commits scope"), "and it says why: {}", app.status);
+}
+
+#[test]
+fn the_review_keys_are_inert_on_a_directory_row() {
+    // `git add <dir>` would mark a whole tree read from one keystroke.
+    let r = Repo::init();
+    r.write("keep.rs", "one\n");
+    r.commit_all("init");
+    r.write("nested/deep/x.rs", "new\n");
+    r.write("nested/deep/y.rs", "new\n");
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    // Land on a directory row, if the tree has one to land on.
+    let dir_row = app.file_rows.iter().position(|row| row.file_index().is_none());
+    let Some(index) = dir_row else { return };
+    app.file_cursor = index;
+    app.diff_path = None;
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "", "no tree staged");
+}
+
+#[test]
+fn a_failed_review_write_leaves_the_mark_alone() {
+    // Derived state may be stale, never wrong: a mark painted over a write that never
+    // landed would be exactly wrong.
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    // An index lock is what a concurrent agent git command holds.
+    std::fs::write(r.path().join(".git/index.lock"), "").unwrap();
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::No), "mark not painted");
+    assert!(app.status.contains("could not"), "and it reports: {}", app.status);
+    std::fs::remove_file(r.path().join(".git/index.lock")).unwrap();
+}
+
+#[test]
+fn the_footer_offers_the_review_mark_and_names_the_direction() {
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    let offered =
+        |app: &App| app.footer_bands().iter().any(|&(a, _)| a == FooterAction::ReviewMark);
+    assert!(offered(&app), "an unmarked file offers the mark");
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    assert!(offered(&app), "a marked file offers the way back");
+    assert!(app.review_mark_set(), "and the label flips to `unmark`");
+
+    app.scope = Scope::Commits;
+    assert!(!offered(&app), "never offered where it would refuse");
+}
+
+#[test]
+fn the_review_keys_rebind() {
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::resolve(&[(Action::Stage, vec![Key::plain('x')])]).unwrap();
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "", "the default is freed");
+
+    press(&mut app, &keymap, KeyCode::Char('x'));
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "a.rs");
 }

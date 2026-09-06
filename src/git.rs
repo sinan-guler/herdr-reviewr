@@ -1,14 +1,16 @@
 //! Git access: scopes, changed files, and diffs.
 //!
-//! The only writes are private refs under `refs/worktree/reviewr/`. Nothing here
-//! commits, stages, or mutates the worktree, the index, or any branch.
+//! Nothing here commits, or mutates file content, the worktree, or any branch. The only
+//! writes are private refs under `refs/worktree/reviewr/`, and the index — the latter only
+//! through [`stage_paths`]/[`unstage_paths`], which run solely under the reviewer's own
+//! stage/unstage keypress and take whole paths, never content.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::model::{ChangeKind, ChangedFile, Scope};
+use crate::model::{ChangeKind, ChangedFile, Scope, Staged};
 
 /// Run `git -C <repo> <args>` and return stdout. Errors on non-zero exit.
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
@@ -1175,6 +1177,132 @@ fn diff_base(repo: &Path) -> String {
     }
 }
 
+// --- the review mark (stage / unstage) -----------------------------------------------
+//
+// Staging is repurposed as a per-file review mark: the reviewer stages a file to record
+// that they read it. That makes the index the reviewed snapshot, which is what lets the
+// `unstaged` scope be the review queue. These two functions are the only place reviewr
+// writes the index, and they run only from the stage/unstage actions.
+
+/// Stage `paths`, marking those files reviewed.
+///
+/// `--literal-pathspecs` is not optional: pathspecs are globs by default, so a file
+/// genuinely named `src/[abc].rs` would otherwise also stage `src/a.rs` — marking a file
+/// the reviewer never looked at. Paths reach here verbatim from `-z` git output, so any
+/// glob metacharacter in them is part of the name.
+pub fn stage_paths(repo: &Path, paths: &[&str]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["--literal-pathspecs", "add", "--"];
+    args.extend_from_slice(paths);
+    git(repo, &args)?;
+    Ok(())
+}
+
+/// Unstage `paths`, taking the review mark back off.
+///
+/// `restore --staged` resolves its pathspec against `HEAD`, so it fails outright in a repo
+/// with no commits; there every index entry is a fresh addition and `rm --cached` is the
+/// exact inverse. That branch is gated on `HEAD` being unborn, because on a born `HEAD`
+/// `rm --cached` would untrack a tracked file — a write well past unstaging.
+pub fn unstage_paths(repo: &Path, paths: &[&str]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = if head_oid(repo).is_some() {
+        vec!["--literal-pathspecs", "restore", "--staged", "--"]
+    } else {
+        vec!["--literal-pathspecs", "rm", "--cached", "--quiet", "--"]
+    };
+    args.extend_from_slice(paths);
+    git(repo, &args)?;
+    Ok(())
+}
+
+/// The paths git considers unmerged (a conflict in progress).
+///
+/// `parse_name_status` folds `U` into `Modified`, so a conflicted file is an ordinary `M`
+/// row on screen and the reviewer has no way to see what staging it would do — and staging
+/// an unmerged path *resolves* the conflict, silently changing what a later
+/// `rebase --continue` does. The stage action refuses on these.
+pub fn unmerged_paths(repo: &Path) -> Result<HashSet<String>> {
+    let out = git(repo, &["ls-files", "--unmerged", "-z"])?;
+    // `ls-files -u` prints one record per stage (`<mode> <oid> <stage>\tpath`), so the same
+    // path arrives two or three times; a set collapses them.
+    Ok(out
+        .split('\0')
+        .filter(|r| !r.is_empty())
+        .filter_map(|r| r.split_once('\t').map(|(_, path)| path.to_string()))
+        .collect())
+}
+
+/// Fill in each file's [`Staged`] mark, in one pair of git calls for the whole changeset.
+///
+/// The two sets are `index vs HEAD` and `worktree vs index`; a path in both was staged and
+/// then changed again, which is exactly `Partial`. The `--cached` side goes through
+/// [`diff_base`] so an unborn `HEAD` reads against the empty tree instead of failing the
+/// build.
+///
+/// A rename is checked on both of its paths: staging only the new path leaves the old
+/// path's deletion unstaged, and reading the new path alone would call that `Yes` when the
+/// mark is really half-applied.
+pub fn mark_staged(repo: &Path, files: &mut [ChangedFile]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let base = diff_base(repo);
+    let staged = name_only_set(repo, &["diff", "--cached", &base, "--name-only", "-z"])?;
+    let unstaged = name_only_set(repo, &["diff", "--name-only", "-z"])?;
+    for file in files {
+        let paths = [Some(&file.path), file.previous_path.as_ref()];
+        let mut paths = paths.into_iter().flatten();
+        let in_staged = paths.clone().any(|p| staged.contains(p));
+        let in_unstaged = paths.any(|p| unstaged.contains(p));
+        file.staged = match (in_staged, in_unstaged) {
+            (true, false) => Staged::Yes,
+            (true, true) => Staged::Partial,
+            (false, _) => Staged::No,
+        };
+    }
+    Ok(())
+}
+
+/// The review mark for one file, read back authoritatively after a stage/unstage write.
+///
+/// The whole-changeset [`mark_staged`] runs on the worker; this is its path-limited twin for
+/// the keystroke path, so the mark painted in the same frame as the write is git's answer
+/// rather than a guess. That matters outside `uncommitted`: a file that differs from the
+/// merge-base but matches `HEAD` cannot be staged at all, and guessing `Yes` there would
+/// paint something simply untrue.
+///
+/// Pass a rename's old path alongside its new one, for the reason [`mark_staged`] gives.
+pub fn staged_state(repo: &Path, paths: &[&str]) -> Result<Staged> {
+    let base = diff_base(repo);
+    let mut cached: Vec<&str> =
+        vec!["--literal-pathspecs", "diff", "--cached", &base, "--name-only", "-z", "--"];
+    cached.extend_from_slice(paths);
+    let staged = reports_any(repo, &cached)?;
+    let mut worktree: Vec<&str> = vec!["--literal-pathspecs", "diff", "--name-only", "-z", "--"];
+    worktree.extend_from_slice(paths);
+    let unstaged = reports_any(repo, &worktree)?;
+    Ok(match (staged, unstaged) {
+        (true, false) => Staged::Yes,
+        (true, true) => Staged::Partial,
+        (false, _) => Staged::No,
+    })
+}
+
+/// Whether a `--name-only -z` diff reported any path at all.
+fn reports_any(repo: &Path, args: &[&str]) -> Result<bool> {
+    Ok(git(repo, args)?.split('\0').any(|p| !p.is_empty()))
+}
+
+/// The paths a `--name-only -z` diff reports, as a set.
+fn name_only_set(repo: &Path, args: &[&str]) -> Result<HashSet<String>> {
+    Ok(git(repo, args)?.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect())
+}
+
 /// The changed files for `scope`, sorted by path. `branch_base` is the resolved base OID
 /// for the `branch` scope ([`resolve_base`]'s winner); with none the scope lists nothing.
 /// `last-turn` is resolved separately by [`changed_against_tree`], so it lists nothing here.
@@ -1193,6 +1321,13 @@ pub fn changed_files(
                 git(repo, &["diff", &base, "--name-status", "-z"])?,
             )
         }
+        // No base: a bare `git diff` is the index against the worktree, which is exactly
+        // "everything not yet reviewed" once staging is the review mark. A file wholly
+        // staged drops out; one staged and then edited again returns carrying only the
+        // part that arrived after the mark.
+        Scope::Unstaged => {
+            (git(repo, &["diff", "--numstat", "-z"])?, git(repo, &["diff", "--name-status", "-z"])?)
+        }
         Scope::Branch => match branch_base.and_then(|b| merge_base(repo, b)) {
             Some(r) => (
                 git(repo, &["diff", &r, "--numstat", "-z"])?,
@@ -1204,8 +1339,9 @@ pub fn changed_files(
         Scope::LastTurn | Scope::Commits => return Ok(Vec::new()),
     };
     // Branch diffs against the worktree, so like uncommitted it carries untracked files
-    // that `git diff` never reports.
-    let include_untracked = matches!(scope, Scope::Uncommitted | Scope::Branch);
+    // that `git diff` never reports. Unstaged carries them too: a file git has never been
+    // told about cannot have been reviewed, so it belongs in the queue.
+    let include_untracked = matches!(scope, Scope::Uncommitted | Scope::Unstaged | Scope::Branch);
     assemble(repo, &numstat, &name_status, include_untracked)
 }
 
@@ -1485,7 +1621,14 @@ fn assemble(
             continue;
         }
         let (additions, deletions) = counts.get(&path).copied().unwrap_or((0, 0));
-        files.push(ChangedFile { path, kind, additions, deletions, previous_path });
+        files.push(ChangedFile {
+            path,
+            kind,
+            additions,
+            deletions,
+            previous_path,
+            staged: Staged::default(),
+        });
     }
 
     if include_untracked {
@@ -1504,6 +1647,7 @@ fn assemble(
                     additions,
                     deletions: 0,
                     previous_path: None,
+                    staged: Staged::default(),
                 });
             }
         }

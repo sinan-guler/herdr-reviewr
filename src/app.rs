@@ -19,7 +19,7 @@ use crate::git;
 use crate::herdr::{self, AgentChoice, SendTarget};
 use crate::highlight::Highlighter;
 use crate::logln;
-use crate::model::{Comment, CommentStore, CommitPick, Rev, Scope, Side};
+use crate::model::{Comment, CommentStore, CommitPick, Rev, Scope, Side, Staged};
 use crate::theme::{self, Palette};
 use crate::world::{PickStatus, PickVerdict};
 
@@ -536,6 +536,9 @@ pub enum FooterAction {
     NavigatorHide,
     Wrap,
     Scope,
+    /// Mark the file under the cursor reviewed, or take the mark back off; the label names
+    /// whichever the press would do.
+    ReviewMark,
     Send,
     List,
     Copy,
@@ -1574,6 +1577,14 @@ impl App {
                 let old = git::file_content(&self.repo, "HEAD", old_path);
                 let new = worktree_content(&self.repo, new_path);
                 (old, new)
+            }
+            // The old side is the index, read as `git show :<path>`: the reviewed snapshot,
+            // since staging is the review mark. A path the index does not hold — an
+            // untracked file, never reviewed — reads empty through the lenient helper, so it
+            // draws as all-insertion, which is what "none of this has been looked at" means.
+            Scope::Unstaged => {
+                let old = git::file_content(&self.repo, "", old_path);
+                (old, worktree_content(&self.repo, new_path))
             }
             Scope::Branch => {
                 let mb = self
@@ -3227,6 +3238,134 @@ impl App {
         Some(EditTarget { path, line })
     }
 
+    /// Whether the file under the cursor is wholly marked reviewed — which of the two
+    /// review keys the footer offers.
+    pub fn review_mark_set(&self) -> bool {
+        self.review_target()
+            .and_then(|e| e.annotation.map(|a| a.staged == Staged::Yes))
+            .unwrap_or(false)
+    }
+
+    /// The file a review keypress would act on: the cursor's file (or the open one behind a
+    /// directory row), and only where the scope considers it changed. The one definition
+    /// the action and the footer share, so the bar can never offer a key that would refuse.
+    fn review_target(&self) -> Option<Entry> {
+        if self.scope == Scope::Commits || !self.tab.is_file_tab() {
+            return None;
+        }
+        self.shown_entry().filter(|e| e.annotation.is_some())
+    }
+
+    /// `stage`: mark the file under the cursor reviewed, by staging it.
+    pub fn stage_selected(&mut self) {
+        self.set_review_mark(true);
+    }
+
+    /// `unstage`: take the review mark back off the file under the cursor.
+    pub fn unstage_selected(&mut self) {
+        self.set_review_mark(false);
+    }
+
+    /// Stage or unstage the file under the cursor — the review mark, the one place reviewr
+    /// writes the index.
+    ///
+    /// The write runs inline and the mark is read back before the frame, so what the row
+    /// shows is always what git holds. On failure nothing moves: the mark is derived state,
+    /// which the Continuity rule allows to be stale but never wrong, and a mark painted over
+    /// a write that never landed would be exactly wrong.
+    fn set_review_mark(&mut self, stage: bool) {
+        // `commits` diffs two committed trees, so the index has nothing to do with what is
+        // on screen and staging there would mark worktree content the reviewer is not
+        // looking at.
+        if self.scope == Scope::Commits {
+            self.status = "nothing to review in the commits scope".into();
+            return;
+        }
+        // A directory row names no file, and `shown_entry` falls back to the open file so the
+        // key works from the read pane too. An entry with no annotation is an `All files` row
+        // the scope does not consider changed — including ignored files, which `git add`
+        // refuses outright.
+        let Some(entry) = self.review_target() else {
+            self.status = "no changed file under the cursor".into();
+            return;
+        };
+        // A rename must carry both of its paths: staging the new path alone leaves the old
+        // path's deletion behind, and the mark could then never complete.
+        let mut paths = vec![entry.path.clone()];
+        if let Some(previous) = entry.previous_path.clone() {
+            paths.push(previous);
+        }
+        // Staging an unmerged path *resolves* the conflict. `parse_name_status` folds `U`
+        // into `Modified`, so the row gives the reviewer no hint that it would — refuse
+        // rather than let a review keystroke rewrite a merge.
+        match git::unmerged_paths(&self.repo) {
+            Ok(unmerged) if paths.iter().any(|p| unmerged.contains(p)) => {
+                self.status = format!("{} has a conflict — resolve it first", entry.path);
+                return;
+            }
+            Ok(_) => {}
+            // A failed probe must not read as "no conflicts": refuse instead of staging over
+            // a merge we could not rule out.
+            Err(e) => {
+                logln!("unmerged probe failed: {e:#}");
+                self.status = "could not check for conflicts".into();
+                return;
+            }
+        }
+
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let wrote = if stage {
+            git::stage_paths(&self.repo, &refs)
+        } else {
+            git::unstage_paths(&self.repo, &refs)
+        };
+        if let Err(e) = wrote {
+            logln!("{} failed: {e:#}", if stage { "stage" } else { "unstage" });
+            // The underlying error names git's argv and is already logged; the pane gets the
+            // one thing the reviewer can act on.
+            self.status =
+                format!("could not {} {}", if stage { "stage" } else { "unstage" }, entry.path);
+            return;
+        }
+
+        let mark = match git::staged_state(&self.repo, &refs) {
+            Ok(mark) => mark,
+            // The write landed, so the row must not keep claiming the old mark. Leave it to
+            // the refresh rather than guessing.
+            Err(e) => {
+                logln!("staged_state failed: {e:#}");
+                self.request_world_refresh(false, false);
+                return;
+            }
+        };
+        self.status = match (stage, mark) {
+            // Outside `uncommitted`, a file that differs from the scope's base but matches
+            // `HEAD` has nothing to stage, and `git add` succeeds having done nothing.
+            (true, Staged::No) => format!("{} is already committed — nothing to stage", entry.path),
+            (true, _) => format!("reviewed {}", entry.path),
+            (false, _) => format!("unmarked {}", entry.path),
+        };
+        self.apply_review_mark(&entry.path, mark);
+        // The mark is settled locally; the refresh reconciles the rest of the changeset —
+        // an untracked file's kind flips to `A`, and the `unstaged` scope drops the file.
+        self.request_world_refresh(false, false);
+    }
+
+    /// Write one file's review mark into both places a row reads it from, so the navigator,
+    /// the `All files` tree, and the search screen cannot disagree until the refresh lands.
+    fn apply_review_mark(&mut self, path: &str, mark: Staged) {
+        if let Some(annotation) = self.changed.get_mut(path) {
+            annotation.staged = mark;
+        }
+        for entry in &mut self.entries {
+            if entry.path == path
+                && let Some(annotation) = entry.annotation.as_mut()
+            {
+                annotation.staged = mark;
+            }
+        }
+    }
+
     fn edit_comment(&mut self) {
         // Editing from the comments-list overlay returns there on finish (else to the diff).
         let from_list = self.mode == Mode::List;
@@ -4261,6 +4400,17 @@ impl App {
                 .position(|&(a, band)| band == Do && a == A::NavigatorHide)
                 .unwrap_or(out.len());
             out.insert(at, (A::EditFile, Do));
+        }
+
+        // The review mark, wherever a press would land one. It sits ahead of the navigator's
+        // hide key for the same reason `edit` does: a narrow row trims trailing actions
+        // first, and marking a file read is worth more there.
+        if self.review_target().is_some() {
+            let at = out
+                .iter()
+                .position(|&(a, band)| band == Do && a == A::NavigatorHide)
+                .unwrap_or(out.len());
+            out.insert(at, (A::ReviewMark, Do));
         }
 
         // An armed crossing leads row 1: nothing else on screen says the next press leaves the

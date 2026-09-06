@@ -7,6 +7,11 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scope {
     Uncommitted,
+    /// Everything not yet staged: the index against the worktree. Staging marks a file
+    /// reviewed, so the index is the reviewed snapshot and this scope is the review queue —
+    /// what changed since you last looked, including a file you reviewed and the agent then
+    /// touched again. A file leaves this scope by being staged, never by a refresh.
+    Unstaged,
     Branch,
     LastTurn,
     /// A picked run of commits, diffed `A^` against `B`.
@@ -17,6 +22,7 @@ impl Scope {
     pub fn label(self) -> &'static str {
         match self {
             Scope::Uncommitted => "uncommitted",
+            Scope::Unstaged => "unstaged",
             Scope::Branch => "branch",
             Scope::LastTurn => "last turn",
             Scope::Commits => "commits",
@@ -28,18 +34,21 @@ impl Scope {
     pub fn name(self) -> &'static str {
         match self {
             Scope::Uncommitted => "uncommitted",
+            Scope::Unstaged => "unstaged",
             Scope::Branch => "branch",
             Scope::LastTurn => "last-turn",
             Scope::Commits => "commits",
         }
     }
 
-    /// Cycle to the next scope, for the header chip click: uncommitted → branch → last turn →
-    /// commits.
+    /// Cycle to the next scope, for the header chip click: uncommitted → unstaged → branch →
+    /// last turn → commits. `unstaged` sits beside `uncommitted` because both read the
+    /// worktree; they differ only in which side they read it against.
     #[must_use]
     pub fn cycle(self) -> Self {
         match self {
-            Scope::Uncommitted => Scope::Branch,
+            Scope::Uncommitted => Scope::Unstaged,
+            Scope::Unstaged => Scope::Branch,
             Scope::Branch => Scope::LastTurn,
             Scope::LastTurn => Scope::Commits,
             Scope::Commits => Scope::Uncommitted,
@@ -96,6 +105,37 @@ impl ChangeKind {
     }
 }
 
+/// How much of a file the index holds — the review mark, since staging a file is how the
+/// reviewer records that they read it.
+///
+/// `Partial` is the interesting one: it means the file was staged and then changed again, so
+/// the mark is real but no longer covers everything on screen. Scopes whose two sides are
+/// both committed trees (`commits`) carry `No` for every file and paint no mark at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Staged {
+    /// Nothing of this file is in the index: not reviewed.
+    #[default]
+    No,
+    /// Staged, then changed again: reviewed, but not all of what is shown.
+    Partial,
+    /// Wholly staged: reviewed.
+    Yes,
+}
+
+impl Staged {
+    /// The review mark's glyph. Absence is the unreviewed state, the way an unticked box
+    /// is: the column is held open by every row regardless, so nothing shifts as marks
+    /// land. A blank also keeps the `commits` scope honest, where the index describes
+    /// neither side and "not reviewed" would be a claim rather than a fact.
+    pub fn marker(self) -> char {
+        match self {
+            Staged::No => ' ',
+            Staged::Partial => '◐',
+            Staged::Yes => '✓',
+        }
+    }
+}
+
 /// A row in the Changes list.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ChangedFile {
@@ -106,6 +146,8 @@ pub struct ChangedFile {
     /// The old path of a renamed file; `None` for every other kind. Its old content lives
     /// at this path, so a rename diffs real content instead of reading as all-insertion.
     pub previous_path: Option<String>,
+    /// How much of this file the index holds — the reviewer's own mark, never git's opinion.
+    pub staged: Staged,
 }
 
 /// Which side of the diff a comment's lines live on.
@@ -220,15 +262,18 @@ mod tests {
 
     #[test]
     fn scope_cycles_and_labels() {
-        // The chip click cycles through all four scopes and wraps.
-        assert_eq!(Scope::Uncommitted.cycle(), Scope::Branch);
+        // The chip click cycles through all five scopes and wraps.
+        assert_eq!(Scope::Uncommitted.cycle(), Scope::Unstaged);
+        assert_eq!(Scope::Unstaged.cycle(), Scope::Branch);
         assert_eq!(Scope::Branch.cycle(), Scope::LastTurn);
         assert_eq!(Scope::LastTurn.cycle(), Scope::Commits);
         assert_eq!(Scope::Commits.cycle(), Scope::Uncommitted);
         assert_eq!(Scope::Uncommitted.label(), "uncommitted");
+        assert_eq!(Scope::Unstaged.label(), "unstaged");
         assert_eq!(Scope::LastTurn.label(), "last turn");
         assert_eq!(Scope::Commits.label(), "commits");
         assert_eq!(Scope::Commits.name(), "commits");
+        assert_eq!(Scope::Unstaged.name(), "unstaged");
     }
 
     #[test]

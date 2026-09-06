@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for the report. A screenshot or recording of the pane is worth a thousand words.
-        Setup and conventions live in [CONTRIBUTING.md](https://github.com/persiyanov/herdr-reviewr/blob/main/CONTRIBUTING.md).
+        Setup and conventions live in [CONTRIBUTING.md](https://github.com/sinan-guler/herdr-reviewr/blob/main/CONTRIBUTING.md).
 
   - type: textarea
     id: current-behavior

@@ -1,7 +1,7 @@
 # Demo recording for herdr-reviewr. Regenerate with:
-#   VERSION=$(awk -F'"' '/^version = / {print $2; exit}' herdr-plugin.toml) && herdr plugin install persiyanov/herdr-reviewr --ref "v$VERSION" --yes && vhs assets/demo.tape
+#   VERSION=$(awk -F'"' '/^version = / {print $2; exit}' herdr-plugin.toml) && herdr plugin install sinan-guler/herdr-reviewr --ref "v$VERSION" --yes && vhs assets/demo.tape
 # Builds a throwaway git repo with an agent-style change, then drives the installed release through
-# the review loop. Needs `git`, `herdr`, `jq`, and `vhs`, with `persiyanov.reviewr` installed.
+# the review loop. Needs `git`, `herdr`, `jq`, and `vhs`, with `sinan-guler.reviewr` installed.
 
 Require git
 Require herdr

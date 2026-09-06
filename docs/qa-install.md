@@ -3,7 +3,7 @@
 How to run a locally built `herdr-reviewr` inside the real herdr panes. Follow it exactly. Every
 step exists because skipping it has broken a session before.
 
-The installed plugin lives at `~/.config/herdr/plugins/github/persiyanov.reviewr-<hash>/` and its
+The installed plugin lives at `~/.config/herdr/plugins/github/sinan-guler.reviewr-<hash>/` and its
 panes run `bin/herdr-reviewr` from that directory by absolute path. QA means swapping that one
 file and restarting the panes.
 
@@ -44,7 +44,7 @@ times tells you which panes are still old.
 The plugin's `open` and `toggle` actions act on the **focused workspace**, whatever
 `HERDR_WORKSPACE_ID` says. Scripting them from outside herdr stacks every new pane into
 whichever workspace happens to be focused. Closing is safe
-(`herdr plugin action invoke close --plugin persiyanov.reviewr` sweeps the focused workspace's
+(`herdr plugin action invoke close --plugin sinan-guler.reviewr` sweeps the focused workspace's
 reviewr panes), but opening is not. After the swap, tell the user: press the reviewr toggle in
 each space you want on the new build. Do not automate it.
 
@@ -57,10 +57,10 @@ each space you want on the new build. Do not automate it.
 ## Rollback
 
 ```
-cd ~/.config/herdr/plugins/github/persiyanov.reviewr-*/bin
+cd ~/.config/herdr/plugins/github/sinan-guler.reviewr-*/bin
 cp herdr-reviewr.release-backup herdr-reviewr.staging
 rm herdr-reviewr && mv herdr-reviewr.staging herdr-reviewr
 ```
 
 Then close and reopen the panes, same as any other swap. A full reinstall
-(`herdr plugin install persiyanov/herdr-reviewr`) also restores the released binary.
+(`herdr plugin install sinan-guler/herdr-reviewr`) also restores the released binary.

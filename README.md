@@ -1,8 +1,8 @@
 # herdr-reviewr
 
-[![CI](https://github.com/persiyanov/herdr-reviewr/actions/workflows/ci.yml/badge.svg)](https://github.com/persiyanov/herdr-reviewr/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/persiyanov/herdr-reviewr)](https://github.com/persiyanov/herdr-reviewr/releases/latest)
-[![License](https://img.shields.io/github/license/persiyanov/herdr-reviewr)](LICENSE)
+[![CI](https://github.com/sinan-guler/herdr-reviewr/actions/workflows/ci.yml/badge.svg)](https://github.com/sinan-guler/herdr-reviewr/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/sinan-guler/herdr-reviewr)](https://github.com/sinan-guler/herdr-reviewr/releases/latest)
+[![License](https://img.shields.io/github/license/sinan-guler/herdr-reviewr)](LICENSE)
 
 <p align="center">
   <a href="#install">install</a> · <a href="#quick-start">quick start</a> · <a href="#controls">controls</a> · <a href="#diff-scopes">scopes</a> · <a href="#configuration">configuration</a> · <a href="#limitations">limitations</a> · <a href="CHANGELOG.md">changelog</a>
@@ -28,8 +28,9 @@ One persistent pane, pointed at a git worktree:
 - **Markdown preview** — flip a `.md` file between source and rendered view.
 - **Themes** — 18 palettes in dark and light.
 
-It never edits your worktree and sends nothing on its own. The **PR** tab reads GitHub,
-GitLab, or Azure DevOps and never posts.
+It never edits your files and sends nothing on its own. The only thing it writes is git's
+index, and only when you press the review key yourself. The **PR** tab reads GitHub, GitLab,
+or Azure DevOps and never posts.
 
 ## Requirements
 
@@ -44,13 +45,13 @@ GitLab, or Azure DevOps and never posts.
 Prebuilt binaries, no Rust toolchain needed:
 
 ```bash
-herdr plugin install persiyanov/herdr-reviewr
+herdr plugin install sinan-guler/herdr-reviewr
 ```
 
 Open it in the current workspace:
 
 ```bash
-herdr plugin action invoke open --plugin persiyanov.reviewr
+herdr plugin action invoke open --plugin sinan-guler.reviewr
 ```
 
 reviewr auto-opens when herdr creates a workspace for a worktree, whether the checkout is new or
@@ -60,11 +61,11 @@ opened from disk. `auto_open = false` keeps it hidden until you ask
 **To update**, reinstall. Your config is keyed by plugin id and survives:
 
 ```bash
-herdr plugin uninstall persiyanov.reviewr && herdr plugin install persiyanov/herdr-reviewr
+herdr plugin uninstall sinan-guler.reviewr && herdr plugin install sinan-guler/herdr-reviewr
 ```
 
 **Without herdr**, reviewr runs as a plain terminal app. Grab a
-[release binary](https://github.com/persiyanov/herdr-reviewr/releases/latest) and point it at a
+[release binary](https://github.com/sinan-guler/herdr-reviewr/releases/latest) and point it at a
 repo:
 
 ```bash
@@ -92,7 +93,7 @@ For a shortcut, bind a key to the toggle in your herdr config (user config, not 
 [[keys.command]]
 key = "cmd+r"
 type = "plugin_action"
-command = "persiyanov.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
+command = "sinan-guler.reviewr.toggle"   # <plugin_id>.<action_id> — note the id, not the name
 ```
 
 `cmd+…` chords reach herdr. Many macOS terminals swallow `alt+…` themselves.
@@ -107,7 +108,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | Key | Action |
 | --- | --- |
 | `1` `2` `3` | Switch tab — Changes / All files / PR |
-| `u` `b` `t` `g` | Switch scope — uncommitted / branch / last turn / commits |
+| `u` `i` `b` `t` `g` | Switch scope — uncommitted / unstaged / branch / last turn / commits |
 | `B` | Pick the base branch |
 | `G` | Pick the commits to review |
 | `j` `k` · `↑` `↓` | Move cursor |
@@ -132,6 +133,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 
 | Key | Action |
 | --- | --- |
+| `a` `A` | Mark the file reviewed / take the mark back off |
 | `v` | Select lines |
 | `c` | Comment on line or selection |
 | `e` | Edit the comment under the cursor, or open the file in your editor |
@@ -178,6 +180,9 @@ links, and scroll with the wheel.
 ## Diff scopes
 
 - **uncommitted** — the working tree vs `HEAD` (staged, unstaged, and untracked).
+- **unstaged** — the working tree vs the **index**: everything you have not marked reviewed
+  yet ([Marking files reviewed](#marking-files-reviewed)). Files leave as you mark them, so
+  the list is your review queue and an empty one means you are done.
 - **branch** — the working tree vs the merge-base with the base branch: **uncommitted** plus
   the branch's commits. The base is your repo's default branch until you pick another with
   `B` ([Base branch](#base-branch)).
@@ -186,11 +191,35 @@ links, and scroll with the wheel.
 - **commits** — one commit, or several in a row, picked with `G`. Read what the agent
   committed one step at a time, without its unsaved edits mixed in.
 
-reviewr starts in **uncommitted**. `default_scope` changes that. Switching with `u`/`b`/`t`/`g`
-wins for the rest of the session. `g` without a pick opens the picker.
+reviewr starts in **uncommitted**. `default_scope` changes that. Switching with
+`u`/`i`/`b`/`t`/`g` wins for the rest of the session. `g` without a pick opens the picker.
 
 Every scope respects `.gitignore`, so build output never clutters **Changes**. To review a file,
 track it. **All files** still browses any ignored path.
+
+## Marking files reviewed
+
+Press `a` on a file to mark it reviewed, `A` to take the mark back off. A mark is just
+`git add`: reviewr stages the file, and the mark column at the left of the file list shows
+where you are.
+
+| Mark | Meaning |
+| --- | --- |
+| (blank) | Not looked at yet |
+| `✓` | Reviewed |
+| `◐` | Reviewed, and changed again since |
+
+Because the mark lives in git's index, the **unstaged** scope is the other half of the same
+idea: it diffs the index against the working tree, so it lists exactly what you have not
+reviewed, and a file you already marked comes back carrying only what arrived after the mark.
+Work down it until it is empty.
+
+Nothing is committed for you — what to commit stays your call, and the marks are already
+staged when you want to. Marking never touches file contents, branches, or `HEAD`.
+
+Two files are left alone: a file with an unresolved merge conflict (staging one resolves the
+conflict, so reviewr refuses), and anything in the **commits** scope, where both sides are
+already committed and the index describes neither.
 
 ## Configuration
 
@@ -206,7 +235,7 @@ CLI flags on the pane command:
 Everything else lives in reviewr's config file:
 
 ```text
-~/.config/herdr/plugins/config/persiyanov.reviewr/config.toml
+~/.config/herdr/plugins/config/sinan-guler.reviewr/config.toml
 ```
 
 Create it if missing. It is reviewr's file. Settings in herdr's `~/.config/herdr/config.toml`
@@ -317,7 +346,7 @@ The action names and their defaults:
 | `down` / `up` | `j` / `k` |
 | `next-hunk` / `prev-hunk` | `]` / `[` |
 | `next-file` / `prev-file` | `f` / `F` |
-| `scope-uncommitted` / `scope-branch` / `scope-last-turn` / `scope-commits` | `u` / `b` / `t` / `g` |
+| `scope-uncommitted` / `scope-unstaged` / `scope-branch` / `scope-last-turn` / `scope-commits` | `u` / `i` / `b` / `t` / `g` |
 | `base-pick` / `commit-pick` | `B` / `G` |
 | `tab-changes` / `tab-all-files` / `tab-pr` | `1` / `2` / `3` |
 | `wrap` | `w` |
@@ -326,6 +355,7 @@ The action names and their defaults:
 | `navigator-hide` | `z` |
 | `navigator-grow` / `navigator-shrink` | `<` / `>` |
 | `select` | `v` |
+| `stage` / `unstage` | `a` / `A` |
 | `comment` | `c` |
 | `edit` / `delete` | `e` / `d` |
 | `next-comment` / `prev-comment` | `n` / `N` |
@@ -396,13 +426,13 @@ command = "herdr-reviewr"
 ```
 
 That pane is a full reviewr pane. The install links the binary at `~/.local/bin/herdr-reviewr`
-and at `~/.local/state/herdr/plugins/persiyanov.reviewr/bin/herdr-reviewr`. Use the long path
+and at `~/.local/state/herdr/plugins/sinan-guler.reviewr/bin/herdr-reviewr`. Use the long path
 if `~/.local/bin` is not on your `PATH`.
 
 A layout hook can also invoke the actions, once its panes are in place:
 
 ```bash
-herdr plugin action invoke open --plugin persiyanov.reviewr
+herdr plugin action invoke open --plugin sinan-guler.reviewr
 ```
 
 `open` ignores `auto_open`, and both actions are safe to repeat. They target the focused
@@ -461,7 +491,7 @@ own build inside herdr panes, link the checkout. `herdr plugin link` runs the bi
 at `bin/herdr-reviewr`:
 
 ```bash
-git clone https://github.com/persiyanov/herdr-reviewr
+git clone https://github.com/sinan-guler/herdr-reviewr
 cd herdr-reviewr
 just install   # build release → bin/herdr-reviewr, ad-hoc re-signed on macOS
 herdr plugin link .
@@ -472,7 +502,7 @@ process. The loop only works while the plugin is linked: a `github:…` source i
 `herdr plugin list` runs a downloaded binary that local rebuilds never touch. Switch with:
 
 ```bash
-herdr plugin uninstall persiyanov.reviewr   # config is keyed by id and survives
+herdr plugin uninstall sinan-guler.reviewr   # config is keyed by id and survives
 herdr plugin link .
 ```
 

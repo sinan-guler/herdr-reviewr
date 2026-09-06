@@ -9,7 +9,7 @@ on:
 permissions:
   contents: write
   # Sigstore-signed build provenance for every release asset, verifiable by anyone via
-  # `gh attestation verify <asset> --repo persiyanov/herdr-reviewr`.
+  # `gh attestation verify <asset> --repo sinan-guler/herdr-reviewr`.
   id-token: write
   attestations: write
 
