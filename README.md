@@ -133,7 +133,8 @@ The keys below are defaults. You can rebind every action, even to several keys a
 
 | Key | Action |
 | --- | --- |
-| `a` `A` | Mark the file reviewed / take the mark back off |
+| `a` | Mark the file reviewed — press again on a marked file to take the mark back off |
+| `A` | Take the mark back off, from any state |
 | `v` | Select lines |
 | `c` | Comment on line or selection |
 | `e` | Edit the comment under the cursor, or open the file in your editor |
@@ -199,15 +200,18 @@ track it. **All files** still browses any ignored path.
 
 ## Marking files reviewed
 
-Press `a` on a file to mark it reviewed, `A` to take the mark back off. A mark is just
-`git add`: reviewr stages the file, and the mark column at the left of the file list shows
-where you are.
+Press `a` on a file to mark it reviewed, and `a` again on a marked file to take the mark back
+off — one key, like a checkbox. (`A` also unmarks, from any state, including a file that has
+changed since you marked it.) A mark is just `git add`: reviewr stages the file, and the mark
+column at the left of the file list shows where you are.
 
 | Mark | Meaning |
 | --- | --- |
 | (blank) | Not looked at yet |
 | `✓` | Reviewed |
 | `◐` | Reviewed, and changed again since |
+
+On a `◐` file, `a` marks the rest rather than clearing what you already read; `A` clears it.
 
 Because the mark lives in git's index, the **unstaged** scope is the other half of the same
 idea: it diffs the index against the working tree, so it lists exactly what you have not

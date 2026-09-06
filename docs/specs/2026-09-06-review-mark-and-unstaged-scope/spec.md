@@ -15,7 +15,8 @@ keeps working while the review runs — which ones have changed since they were 
 
 ## Proposal
 
-Staging *is* the review mark. `a` stages the file under the cursor, `A` unstages it.
+Staging *is* the review mark. `a` stages the file under the cursor and, pressed again on a
+wholly-marked file, unstages it; `A` unstages from any state.
 
 That is not a metaphor. The reviewer commits by hand in this workflow, so the index is unused
 by the agent, and repurposing it costs nothing and buys three things a private store could not:
@@ -68,6 +69,9 @@ Observable:
 - Mark a file, then edit it again. It returns to `unstaged` carrying only the lines added after
   the mark, and reads `◐` in every scope that shows it.
 - Unmark it. The mark clears and the whole change is back in `unstaged`.
+- Press `a` twice on an unmarked file. It is marked, then unmarked — the second press is the
+  way back, and the footer's label turns around on the same key.
+- Press `a` on a `◐` file. The mark completes to `✓`; it does not clear.
 - Mark an untracked file. Its change marker flips `?` → `A`, because staging is what makes git
   track it. The row keeps its place and its stats.
 - `a` in the `commits` scope does nothing and says why.
@@ -86,8 +90,12 @@ Observable:
   parsed from a git patch — there is no path from a row back to an applicable patch fragment.
   A hunk-level mark would also answer a question the reviewer is not asking: files are the unit
   of "I read this."
-- **Two keys, not one toggle.** On a `Partial` file a toggle has no obvious meaning — stage the
-  rest, or drop the mark entirely?
+- **`a` toggles; `A` stays.** The mark is a checkbox and the key that ticks it should clear it —
+  reaching for shift to undo the press you just made is a second dialect for one gesture. The
+  `Partial` ambiguity that argued for two keys is settled by direction rather than by a second
+  key: `a` always moves *forward*, so a partly-marked file completes its mark instead of losing
+  the lines the reviewer did read. `A` remains the outright unmark, and the only way back from
+  `Partial`.
 - **`i`, not `U`, for the scope.** `U` sits one shift away from `u` and would read as a variant of
   `uncommitted` rather than a different question. `i` names what the scope actually diffs against.
 - **The write is inline, and read back.** See UX-INLINE below.
@@ -121,6 +129,7 @@ Each one is false if a single test below is red.
 | RM-PARTIAL | A file marked and then changed again reads `Partial`. | `a_file_changed_after_its_mark_reads_partial` |
 | RM-NO-CONFLICT | An unmerged path is reported so the action can refuse, even though the row reads as an ordinary `Modified`. | `an_unmerged_path_is_reported_so_the_mark_can_refuse` |
 | RM-NEVER-WRONG | A failed write leaves the mark as it was; the pane reports instead. | `a_failed_review_write_leaves_the_mark_alone` |
+| RM-TOGGLE | `a` on a wholly-marked file unmarks it; on a `Partial` file it completes the mark. | `the_stage_key_takes_a_whole_mark_back_off`, `the_stage_key_completes_a_partial_mark_rather_than_dropping_it` |
 | RM-INERT | The keys do nothing in `commits`, on a directory row, or on a row the scope does not consider changed — and the footer never offers them there. | `the_review_keys_are_inert_*`, `the_footer_offers_the_review_mark_and_names_the_direction` |
 | US-QUEUE | `unstaged` lists exactly the unmarked changes plus untracked files; a wholly marked file is absent. | `the_unstaged_scope_is_the_review_queue` |
 | US-DELTA | A file marked and then edited shows in `unstaged` only what arrived after the mark, while `uncommitted` still shows the whole change. | `the_unstaged_scope_shows_only_what_arrived_after_the_mark` |
@@ -136,7 +145,9 @@ Each one is false if a single test below is red.
 - **Hunk or line staging, like lazygit's staging panel.** The diff model has no hunk object and
   is not built from a git patch; it would need patch synthesis and `git apply --cached`. And the
   reviewer's unit is the file.
-- **One toggle key.** Ambiguous on `Partial`.
+- **`a` as pure toggle, unmarking a `Partial` file too.** Symmetrical, but it throws away a mark
+  the reviewer earned and leaves no forward key for the common case (finish reading a file the
+  agent touched again).
 - **Deriving the scope from the mark instead of from git.** The index already *is* the derived
   state; a parallel one could disagree with `git status`.
 - **Painting a dot for unreviewed.** Noise on every row, and a false claim in `commits`.

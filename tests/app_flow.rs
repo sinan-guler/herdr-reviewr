@@ -7465,6 +7465,48 @@ fn the_stage_key_marks_the_file_under_the_cursor_reviewed() {
 }
 
 #[test]
+fn the_stage_key_takes_a_whole_mark_back_off() {
+    // The mark is a checkbox: the key that ticks it clears it.
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::Yes));
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "", "back out of the index");
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::No));
+    assert!(app.status.contains("unmarked"), "status says so: {}", app.status);
+    assert!(!app.review_mark_set());
+
+    // And again: the toggle keeps going, it does not settle on one side.
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::Yes));
+}
+
+#[test]
+fn the_stage_key_completes_a_partial_mark_rather_than_dropping_it() {
+    // `Partial` is "reviewed, and changed again since". The forward branch marks the rest;
+    // dropping it would throw away a mark the reviewer earned on the lines they did read.
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    r.write("a.rs", "three\n");
+    common::land_world(&mut app);
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::Partial), "the agent edited it again");
+    assert!(!app.review_mark_set(), "a partial mark is not a whole one");
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::Yes), "the mark completes");
+    assert!(app.status.contains("reviewed"), "status says so: {}", app.status);
+}
+
+#[test]
 fn the_unstage_key_takes_the_mark_back_off() {
     let r = review_repo();
     let mut app = app_on(&r);
@@ -7563,7 +7605,7 @@ fn the_footer_offers_the_review_mark_and_names_the_direction() {
 
     press(&mut app, &keymap, KeyCode::Char('a'));
     assert!(offered(&app), "a marked file offers the way back");
-    assert!(app.review_mark_set(), "and the label flips to `unmark`");
+    assert!(app.review_mark_set(), "and the label flips to `unmark`, on the same key");
 
     app.scope = Scope::Commits;
     assert!(!offered(&app), "never offered where it would refuse");

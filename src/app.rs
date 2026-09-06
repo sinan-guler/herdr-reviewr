@@ -3238,8 +3238,8 @@ impl App {
         Some(EditTarget { path, line })
     }
 
-    /// Whether the file under the cursor is wholly marked reviewed — which of the two
-    /// review keys the footer offers.
+    /// Whether the file under the cursor is wholly marked reviewed — the direction the
+    /// `stage` key takes, and the label the footer prints on it.
     pub fn review_mark_set(&self) -> bool {
         self.review_target()
             .and_then(|e| e.annotation.map(|a| a.staged == Staged::Yes))
@@ -3256,9 +3256,15 @@ impl App {
         self.shown_entry().filter(|e| e.annotation.is_some())
     }
 
-    /// `stage`: mark the file under the cursor reviewed, by staging it.
+    /// `stage`: mark the file under the cursor reviewed, by staging it — or, on a file already
+    /// wholly marked, take the mark back off. One key both ways, so the mark reads as the
+    /// checkbox it is: press to tick, press again to clear.
+    ///
+    /// A `Partial` file (marked, then changed again) takes the forward branch and completes the
+    /// mark. The reverse would drop a mark the reviewer earned on the lines they did read, and
+    /// `unstage` is still there to clear it outright.
     pub fn stage_selected(&mut self) {
-        self.set_review_mark(true);
+        self.set_review_mark(!self.review_mark_set());
     }
 
     /// `unstage`: take the review mark back off the file under the cursor.

@@ -2576,8 +2576,9 @@ fn action_key_label(app: &App, action: FooterAction) -> (String, String) {
             ),
             "scope",
         ),
-        // A wholly-marked file offers the way back; every other state offers the mark.
-        A::ReviewMark if app.review_mark_set() => (hint(K::Unstage), "unmark"),
+        // One key both ways: on a wholly-marked file the same press takes the mark back off,
+        // so the bar names `stage` throughout and only the label turns around.
+        A::ReviewMark if app.review_mark_set() => (hint(K::Stage), "unmark"),
         A::ReviewMark => (hint(K::Stage), "reviewed"),
         A::Send => return (hint(K::Send), format!("send {}", app.store.len())),
         A::List => (hint(K::Comments), "comments"),

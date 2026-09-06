@@ -192,8 +192,8 @@ const ACTIONS: [(Action, &str, &[Key]); 45] = [
     (Action::NavigatorGrow, "navigator-grow", &[Key::plain('<')]),
     (Action::NavigatorShrink, "navigator-shrink", &[Key::plain('>')]),
     (Action::Select, "select", &[Key::plain('v')]),
-    // `a` for git's own `add`. Two actions rather than one toggle: on a partly-marked file a
-    // toggle has no obvious meaning — stage the rest, or drop the mark entirely?
+    // `a` for git's own `add`. It toggles: a wholly-marked file unmarks, everything else marks
+    // (a partly-marked file completes its mark). `A` unmarks outright, from any state.
     (Action::Stage, "stage", &[Key::plain('a')]),
     (Action::Unstage, "unstage", &[Key::plain('A')]),
     (Action::Comment, "comment", &[Key::plain('c')]),
