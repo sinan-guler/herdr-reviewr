@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.38.0] — 2026-09-07
+
+### Changed
+- **`a` toggles the review mark.** Pressing `a` on a file you already marked reviewed takes the
+  mark back off, so the one key both ticks and clears it. On a `◐` file — marked, then changed
+  again since — `a` still moves forward and completes the mark rather than dropping what you
+  already read; `A` remains the outright unmark, from any state.
+
 ## [0.37.0] — 2026-09-06
 
 ### Added
