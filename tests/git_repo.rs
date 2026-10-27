@@ -1249,9 +1249,15 @@ fn an_unmerged_path_is_reported_so_the_mark_can_refuse() {
     r.git(&["checkout", "-q", "main"]);
     r.write("c.txt", "main\n");
     r.commit_all("main");
-    // The merge is expected to conflict, so it is not asserted successful.
-    let _ =
-        std::process::Command::new("git").arg("-C").arg(r.path()).args(["merge", "other"]).output();
+    // The merge is expected to conflict, so it is not asserted successful. It still needs an
+    // identity: without one (CI has no global config) git refuses before it ever conflicts.
+    let _ = std::process::Command::new("git")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@herdr.test")
+        .arg("-C")
+        .arg(r.path())
+        .args(["merge", "other"])
+        .output();
 
     let unmerged = unmerged_paths(r.path()).unwrap();
     assert!(unmerged.contains("c.txt"), "the conflicted path is reported: {unmerged:?}");
