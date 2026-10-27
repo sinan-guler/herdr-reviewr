@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.39.0] — 2026-10-28
+
 ### Added
 - **Mark a run of files at once.** `v` in the **Changes** file list starts a range, `j` / `k`
   extend it, and `a` marks every file in it (or unmarks them, when all are already marked);
