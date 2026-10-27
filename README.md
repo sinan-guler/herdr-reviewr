@@ -22,7 +22,7 @@ One persistent pane, pointed at a git worktree:
 - **Line comments** — comment on a line or a range. Then send it to the agent.
 - **Text selection** — drag over any text to copy it, like an editor.
 - **File viewer** — any file's current content from the whole worktree.
-- **Search** — fuzzy file names and live code grep across the worktree, powered by [fff](https://github.com/dmtrKovalenko/fff).
+- **Search** — fuzzy file names and live code grep, powered by [fff](https://github.com/dmtrKovalenko/fff). From **Changes** it searches only the active scope's changed files, from **All files** the whole worktree.
 - **Find in file** — search the open file and step between every match.
 - **PR view** — the branch's pull request in the pane, read-only.
 - **Markdown preview** — flip a `.md` file between source and rendered view.
@@ -135,7 +135,7 @@ The keys below are defaults. You can rebind every action, even to several keys a
 | --- | --- |
 | `a` | Mark the file reviewed — press again on a marked file to take the mark back off |
 | `A` | Take the mark back off, from any state |
-| `v` | Select lines |
+| `v` | Select lines — in the **Changes** file list, select a run of files for `a` / `A` |
 | `c` | Comment on line or selection |
 | `e` | Edit the comment under the cursor, or open the file in your editor |
 | `d` | Delete comment |

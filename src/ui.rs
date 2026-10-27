@@ -1555,7 +1555,9 @@ fn render_file_list(frame: &mut Frame, app: &App, area: Rect) {
         .take(inner.height as usize)
         .map(|(i, row)| {
             // The selected row fills with the cursor color, dimmed when the list is unfocused.
-            let fill = (i == app.file_cursor).then(|| p.cursor_bg(app.focus == Focus::Files));
+            let fill = (i == app.file_cursor)
+                .then(|| p.cursor_bg(app.focus == Focus::Files))
+                .or_else(|| app.file_row_selected(i).then_some(p.sel_bg));
             let nest = "  ".repeat(row.depth);
             match &row.kind {
                 RowKind::Dir { expanded, .. } => {
@@ -3597,7 +3599,7 @@ fn render_search(frame: &mut Frame, app: &App, body: Rect) {
     let prompt = "> ";
     let avail = (query_w as usize).saturating_sub(prompt.width());
     let (query_spans, caret_cell_col) =
-        input_line(&s.query, s.caret, avail, "Search files and code…", p);
+        input_line(&s.query, s.caret, avail, search_placeholder(app), p);
     let mut input = Line::from(query_spans);
     input.spans.insert(0, Span::styled(prompt, Style::default().fg(p.orange)));
     let input_area = Rect::new(l.band.x, l.band.y, query_w, l.band.height);
@@ -3613,6 +3615,16 @@ fn render_search(frame: &mut Frame, app: &App, body: Rect) {
     render_search_results(frame, app, s, l.results, p);
     render_search_divider(frame, s, l.divider, p);
     render_search_preview(frame, s, l.preview, p);
+}
+
+/// The empty query's placeholder, naming the narrowing so an empty result set is not read
+/// as "nothing in the repo matches".
+fn search_placeholder(app: &App) -> &'static str {
+    if app.tab == crate::app::Tab::Changes {
+        "Search changed files…"
+    } else {
+        "Search files and code…"
+    }
 }
 
 fn render_search_results(

@@ -56,6 +56,7 @@ pub enum Focus {
 
 /// What the file-list cursor points at, by path, so it can be restored to the same target
 /// after the tree rebuilds on a poll.
+#[derive(Clone, Debug)]
 enum Anchor {
     File(String),
     Dir(String),
@@ -105,6 +106,7 @@ struct TabStash {
     diff_scroll: usize,
     h_scroll: usize,
     select_anchor: Option<usize>,
+    file_select: Option<Anchor>,
     preview: bool,
     preview_scroll: usize,
     preview_scrolled: bool,
@@ -719,6 +721,8 @@ pub struct App {
     pub search_pct: u16,
     divider_drag: DividerDrag,
     pub select_anchor: Option<usize>,
+    /// The navigator range's anchor row, held by identity so a rebuild cannot move it.
+    file_select: Option<Anchor>,
     /// The one live mouse gesture — born at mouse-down, ended on release or an interrupting event.
     pub gesture: crate::selection::Gesture,
     /// The settled selection: the last copy's span and its copied text, kept highlighted as
@@ -918,6 +922,7 @@ impl App {
             last_click: None,
             view_reload_held: false,
             select_anchor: None,
+            file_select: None,
             store: CommentStore::new(),
             list_cursor: 0,
             picker_rows: Vec::new(),
@@ -1188,10 +1193,12 @@ impl App {
             .position(|r| r.file_index().is_some_and(|i| self.entries[i].path == path))
     }
 
-    /// The visible-row index of the first file row, the initial selection so a diff shows
-    /// at once even when the tree opens on a directory.
-    fn first_file_row(&self) -> Option<usize> {
-        self.file_rows.iter().position(|r| r.file_index().is_some())
+    /// The file row nearest `row` once its own target is gone: the one that slid into its
+    /// place (or the next below), else the last one above.
+    fn nearest_file_row(&self, row: usize) -> Option<usize> {
+        let is_file = |i: &usize| self.file_rows[*i].file_index().is_some();
+        let below = row.min(self.file_rows.len());
+        (below..self.file_rows.len()).find(is_file).or_else(|| (0..below).rev().find(is_file))
     }
 
     /// Rebuild the flattened tree from `entries` and the toggled-directory set.
@@ -1317,6 +1324,7 @@ impl App {
         // Keep the cursor on the same row target across the rebuild; fall back to the open
         // file, then the first file. The toggled-directory set survives untouched.
         let anchor = self.cursor_anchor();
+        let old_cursor = self.file_cursor;
         let open = self.diff_path.clone();
         self.changed = snapshot.changed;
         self.entries = snapshot.entries;
@@ -1326,9 +1334,13 @@ impl App {
         self.file_cursor = anchor
             .and_then(|a| self.row_of_anchor(&a))
             .or_else(|| open.as_deref().and_then(|p| self.file_row_of_path(p)))
-            .or_else(|| self.first_file_row())
+            .or_else(|| self.nearest_file_row(old_cursor))
             .unwrap_or(0)
             .min(self.file_rows.len().saturating_sub(1));
+        // A range whose anchor row left the tree has nothing to measure from.
+        if self.file_select.as_ref().is_some_and(|a| self.row_of_anchor(a).is_none()) {
+            self.file_select = None;
+        }
         // A poll preserves the file-list wheel scroll — it does not reveal the cursor.
         // Explicit actions (navigation, a scope switch) request their own reveal.
         // While a modal is open the diff below it is frozen, so a poll can't shift the anchor
@@ -2222,6 +2234,9 @@ impl App {
     /// so a return to Changes never lands on a stale scroll or a pre-expanded fold.
     fn rebase_changes(&mut self) -> Result<()> {
         self.cache = DiffCache::new();
+        // The range lives on `Changes`, whose cursor resets below.
+        self.file_select = None;
+        self.stash.file_select = None;
         if self.tab == Tab::Changes {
             self.file_cursor = 0;
             self.expanded_folds.clear();
@@ -2536,6 +2551,7 @@ impl App {
         std::mem::swap(&mut self.diff_scroll, &mut self.stash.diff_scroll);
         std::mem::swap(&mut self.h_scroll, &mut self.stash.h_scroll);
         std::mem::swap(&mut self.select_anchor, &mut self.stash.select_anchor);
+        std::mem::swap(&mut self.file_select, &mut self.stash.file_select);
         std::mem::swap(&mut self.preview, &mut self.stash.preview);
         std::mem::swap(&mut self.preview_scroll, &mut self.stash.preview_scroll);
         std::mem::swap(&mut self.preview_text, &mut self.stash.preview_text);
@@ -2747,6 +2763,9 @@ impl App {
         if self.tab != Tab::Pr {
             if self.select_anchor.is_some() {
                 self.clear_selection();
+                return;
+            }
+            if self.file_select.take().is_some() {
                 return;
             }
             if self.armed_cross.is_some() {
@@ -3123,6 +3142,12 @@ impl App {
                 None => Some(self.diff_cursor),
             };
             self.reveal_diff = true;
+        } else if self.focus == Focus::Files && self.tab == Tab::Changes {
+            // The navigator's range, for the review keys.
+            self.file_select = match self.file_select {
+                Some(_) => None,
+                None => self.cursor_anchor(),
+            };
         }
     }
 
@@ -3238,27 +3263,67 @@ impl App {
         Some(EditTarget { path, line })
     }
 
-    /// Whether the file under the cursor is wholly marked reviewed — the direction the
-    /// `stage` key takes, and the label the footer prints on it.
+    /// Whether every file a review keypress would act on is wholly marked reviewed — the
+    /// direction the `stage` key takes, and the label the footer prints on it.
     pub fn review_mark_set(&self) -> bool {
-        self.review_target()
-            .and_then(|e| e.annotation.map(|a| a.staged == Staged::Yes))
-            .unwrap_or(false)
+        let targets = self.review_targets();
+        !targets.is_empty()
+            && targets
+                .iter()
+                .all(|e| e.annotation.as_ref().is_some_and(|a| a.staged == Staged::Yes))
     }
 
-    /// The file a review keypress would act on: the cursor's file (or the open one behind a
-    /// directory row), and only where the scope considers it changed. The one definition
-    /// the action and the footer share, so the bar can never offer a key that would refuse.
-    fn review_target(&self) -> Option<Entry> {
+    /// The files a review keypress would act on: the navigator's range when one is live, else
+    /// the cursor's file (or the open one behind a directory row) — and only where the scope
+    /// considers them changed. The one definition the action and the footer share, so the bar
+    /// can never offer a key that would refuse.
+    fn review_targets(&self) -> Vec<Entry> {
         if self.scope == Scope::Commits || !self.tab.is_file_tab() {
-            return None;
+            return Vec::new();
         }
-        self.shown_entry().filter(|e| e.annotation.is_some())
+        let Some((lo, hi)) = self.file_range() else {
+            return self.shown_entry().filter(|e| e.annotation.is_some()).into_iter().collect();
+        };
+        // Each row once, in row order: a file row is itself, a collapsed directory row stands
+        // for every file under it, and an expanded one adds nothing — its children are rows.
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for row in &self.file_rows[lo..=hi] {
+            let indices: Vec<usize> = match &row.kind {
+                RowKind::File { index, .. } => vec![*index],
+                RowKind::Dir { path, expanded: false } => {
+                    let prefix = format!("{path}/");
+                    (0..self.entries.len())
+                        .filter(|&i| self.entries[i].path.starts_with(&prefix))
+                        .collect()
+                }
+                RowKind::Dir { .. } => Vec::new(),
+            };
+            for i in indices {
+                if seen.insert(i) && self.entries[i].annotation.is_some() {
+                    out.push(self.entries[i].clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// The navigator range's inclusive `[lo, hi]` rows, `None` when no range is live.
+    fn file_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.row_of_anchor(self.file_select.as_ref()?)?;
+        let cursor = self.file_cursor.min(self.file_rows.len().saturating_sub(1));
+        Some((anchor.min(cursor), anchor.max(cursor)))
+    }
+
+    /// Whether navigator row `i` sits inside the live range — the selection fill's test.
+    pub fn file_row_selected(&self, i: usize) -> bool {
+        self.file_range().is_some_and(|(lo, hi)| lo <= i && i <= hi)
     }
 
     /// `stage`: mark the file under the cursor reviewed, by staging it — or, on a file already
     /// wholly marked, take the mark back off. One key both ways, so the mark reads as the
-    /// checkbox it is: press to tick, press again to clear.
+    /// checkbox it is: press to tick, press again to clear. Over a range, it marks the set
+    /// unless every file in it is already marked.
     ///
     /// A `Partial` file (marked, then changed again) takes the forward branch and completes the
     /// mark. The reverse would drop a mark the reviewer earned on the lines they did read, and
@@ -3267,13 +3332,13 @@ impl App {
         self.set_review_mark(!self.review_mark_set());
     }
 
-    /// `unstage`: take the review mark back off the file under the cursor.
+    /// `unstage`: take the review mark back off the file under the cursor, or the range.
     pub fn unstage_selected(&mut self) {
         self.set_review_mark(false);
     }
 
-    /// Stage or unstage the file under the cursor — the review mark, the one place reviewr
-    /// writes the index.
+    /// Stage or unstage the review targets — the review mark, the one place reviewr writes
+    /// the index. A range is consumed by the keypress, whatever the outcome.
     ///
     /// The write runs inline and the mark is read back before the frame, so what the row
     /// shows is always what git holds. On failure nothing moves: the mark is derived state,
@@ -3291,25 +3356,33 @@ impl App {
         // key works from the read pane too. An entry with no annotation is an `All files` row
         // the scope does not consider changed — including ignored files, which `git add`
         // refuses outright.
-        let Some(entry) = self.review_target() else {
+        let targets = self.review_targets();
+        self.file_select = None;
+        if targets.is_empty() {
             self.status = "no changed file under the cursor".into();
             return;
+        }
+        let name = |verb: &str| match targets.as_slice() {
+            [one] => format!("{verb} {}", one.path),
+            many => format!("{verb} {} files", many.len()),
         };
         // A rename must carry both of its paths: staging the new path alone leaves the old
         // path's deletion behind, and the mark could then never complete.
-        let mut paths = vec![entry.path.clone()];
-        if let Some(previous) = entry.previous_path.clone() {
-            paths.push(previous);
-        }
+        let paths: Vec<String> = targets
+            .iter()
+            .flat_map(|e| std::iter::once(e.path.clone()).chain(e.previous_path.clone()))
+            .collect();
         // Staging an unmerged path *resolves* the conflict. `parse_name_status` folds `U`
         // into `Modified`, so the row gives the reviewer no hint that it would — refuse
-        // rather than let a review keystroke rewrite a merge.
+        // rather than let a review keystroke rewrite a merge. One conflict refuses the whole
+        // set, so a range is never half-applied.
         match git::unmerged_paths(&self.repo) {
-            Ok(unmerged) if paths.iter().any(|p| unmerged.contains(p)) => {
-                self.status = format!("{} has a conflict — resolve it first", entry.path);
-                return;
+            Ok(unmerged) => {
+                if let Some(p) = paths.iter().find(|p| unmerged.contains(*p)) {
+                    self.status = format!("{p} has a conflict — resolve it first");
+                    return;
+                }
             }
-            Ok(_) => {}
             // A failed probe must not read as "no conflicts": refuse instead of staging over
             // a merge we could not rule out.
             Err(e) => {
@@ -3329,32 +3402,75 @@ impl App {
             logln!("{} failed: {e:#}", if stage { "stage" } else { "unstage" });
             // The underlying error names git's argv and is already logged; the pane gets the
             // one thing the reviewer can act on.
-            self.status =
-                format!("could not {} {}", if stage { "stage" } else { "unstage" }, entry.path);
+            self.status = name(if stage { "could not stage" } else { "could not unstage" });
             return;
         }
 
-        let mark = match git::staged_state(&self.repo, &refs) {
-            Ok(mark) => mark,
-            // The write landed, so the row must not keep claiming the old mark. Leave it to
-            // the refresh rather than guessing.
-            Err(e) => {
-                logln!("staged_state failed: {e:#}");
-                self.request_world_refresh(false, false);
-                return;
+        let mut marks = Vec::with_capacity(targets.len());
+        for entry in &targets {
+            let refs: Vec<&str> = std::iter::once(entry.path.as_str())
+                .chain(entry.previous_path.as_deref())
+                .collect();
+            match git::staged_state(&self.repo, &refs) {
+                Ok(mark) => marks.push((entry.path.clone(), mark)),
+                // The write landed, so the rows must not keep claiming the old mark. Leave
+                // them to the refresh rather than guessing.
+                Err(e) => {
+                    logln!("staged_state failed: {e:#}");
+                    self.request_world_refresh(false, false);
+                    return;
+                }
             }
-        };
-        self.status = match (stage, mark) {
+        }
+        self.status = match (stage, marks.as_slice()) {
             // Outside `uncommitted`, a file that differs from the scope's base but matches
             // `HEAD` has nothing to stage, and `git add` succeeds having done nothing.
-            (true, Staged::No) => format!("{} is already committed — nothing to stage", entry.path),
-            (true, _) => format!("reviewed {}", entry.path),
-            (false, _) => format!("unmarked {}", entry.path),
+            (true, [(path, Staged::No)]) => {
+                format!("{path} is already committed — nothing to stage")
+            }
+            (true, _) => name("reviewed"),
+            (false, _) => name("unmarked"),
         };
-        self.apply_review_mark(&entry.path, mark);
+        for (path, mark) in &marks {
+            self.apply_review_mark(path, *mark);
+        }
+        // A wholly staged file has no index-vs-worktree diff left: drop it from the
+        // `unstaged` changeset now, so the row leaves on this frame rather than when the
+        // refresh lands behind a poll that may still be building.
+        let done: Vec<&str> =
+            marks.iter().filter(|(_, m)| *m == Staged::Yes).map(|(p, _)| p.as_str()).collect();
+        if self.scope == Scope::Unstaged && !done.is_empty() {
+            self.drop_from_changeset(&done);
+        } else if self.scope == Scope::Unstaged && !stage {
+            // An unmarked file's index side falls back to `HEAD`, so its diff grows: rebuild
+            // just that diff now (`content_sides` reads the index fresh), and leave the rest
+            // of the changeset to the refresh below.
+            self.reload_open_view();
+        }
         // The mark is settled locally; the refresh reconciles the rest of the changeset —
         // an untracked file's kind flips to `A`, and the `unstaged` scope drops the file.
         self.request_world_refresh(false, false);
+    }
+
+    /// Reconcile the current changeset minus `paths`, the same way a landed snapshot would.
+    fn drop_from_changeset(&mut self, paths: &[&str]) {
+        let gone = |p: &String| paths.contains(&p.as_str());
+        let mut changed = self.changed.clone();
+        changed.retain(|p, _| !gone(p));
+        let mut entries = self.entries.clone();
+        if self.tab == Tab::AllFiles {
+            // `All files` keeps every worktree path; only the change annotation goes.
+            entries.iter_mut().filter(|e| gone(&e.path)).for_each(|e| e.annotation = None);
+        } else {
+            entries.retain(|e| !gone(&e.path));
+        }
+        self.reconcile_world(crate::world::WorldSnapshot {
+            changed,
+            entries,
+            branch_base: self.branch_base.clone(),
+            pick_status: self.pick_status.clone(),
+            head: None,
+        });
     }
 
     /// Write one file's review mark into both places a row reads it from, so the navigator,
@@ -3875,6 +3991,12 @@ impl App {
         self.changed.get(path)
     }
 
+    /// The paths `/` searches: the active scope's changeset from `Changes`, so the scope
+    /// decides the universe, and the whole worktree (`None`) from `All files`.
+    pub fn search_only(&self) -> Option<HashSet<String>> {
+        (self.tab == Tab::Changes).then(|| self.changed.keys().cloned().collect())
+    }
+
     /// `/`: open the search screen, from any tab, from either pane.
     pub fn open_search(&mut self) {
         // A navigator-divider drag held from the review view must not become a search-split
@@ -4365,6 +4487,13 @@ impl App {
                     pane_is_primary = true;
                 }
             }
+            // The range the review keys act on, on `Changes` only.
+            if self.tab == Tab::Changes {
+                out.push((
+                    if self.file_select.is_some() { A::ClearSelection } else { A::Select },
+                    Do,
+                ));
+            }
             // The files pane's calm row 1 has the room for the hide key.
             out.push((A::NavigatorHide, Do));
         } else if self.visible.is_empty() {
@@ -4411,7 +4540,7 @@ impl App {
         // The review mark, wherever a press would land one. It sits ahead of the navigator's
         // hide key for the same reason `edit` does: a narrow row trims trailing actions
         // first, and marking a file read is worth more there.
-        if self.review_target().is_some() {
+        if !self.review_targets().is_empty() {
             let at = out
                 .iter()
                 .position(|&(a, band)| band == Do && a == A::NavigatorHide)

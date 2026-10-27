@@ -5,9 +5,10 @@
 //! its background scan, so a query never runs on the frame loop. Completions are
 //! generation-tagged and land latest-wins, like the world worker's.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fff_search::{
     FFFQuery, FilePicker, FilePickerOptions, FileSearchConfig, FrecencyTracker, FuzzySearchOptions,
@@ -33,8 +34,9 @@ pub fn cache_dir() -> PathBuf {
 /// One request to the worker.
 #[derive(Debug)]
 pub enum SearchJob {
-    /// Run `query`; the completion echoes the generation back.
-    Query { generation: u64, query: String },
+    /// Run `query`; the completion echoes the generation back. `only` narrows both groups
+    /// to those paths — the `Changes` tab's changeset — and `None` searches the worktree.
+    Query { generation: u64, query: String, only: Option<HashSet<String>> },
     /// Record a picked result in the engine's frecency store, so ranking improves with
     /// use.
     Track { path: String },
@@ -131,21 +133,25 @@ impl Engine {
         self.shared.wait_for_scan(Duration::from_millis(1))
     }
 
-    /// Run one query against the warm index: the path group, then the content group.
-    fn run(&self, raw: &str) -> Result<SearchResults, String> {
+    /// Run one query against the warm index: the path group, then the content group. With
+    /// `only`, hits outside it drop before the caps, so they never crowd a kept file out.
+    fn run(&self, raw: &str, only: Option<&HashSet<String>>) -> Result<SearchResults, String> {
         let guard = self.shared.read().map_err(|e| e.to_string())?;
         let picker = guard.as_ref().ok_or("search engine not ready")?;
         let query = FFFQuery::parse(raw, FileSearchConfig);
 
+        let keep = |path: &str| only.is_none_or(|set| set.contains(path));
+        // Narrowed, the engine returns every match (limit 0) and the cap applies after.
+        let limit = if only.is_some() { 0 } else { FILE_LIMIT };
         let found = picker.fuzzy_search(
             &query,
             None,
             FuzzySearchOptions {
-                pagination: PaginationArgs { offset: 0, limit: FILE_LIMIT },
+                pagination: PaginationArgs { offset: 0, limit },
                 ..Default::default()
             },
         );
-        let files: Vec<FileHit> = found
+        let mut files: Vec<FileHit> = found
             .items
             .iter()
             .zip(&found.match_byte_offsets)
@@ -153,8 +159,11 @@ impl Engine {
                 path: i.relative_path(picker),
                 spans: spans.iter().copied().collect(),
             })
+            .filter(|hit| keep(&hit.path))
             .collect();
-        let file_total = found.total_matched.max(files.len());
+        let file_total =
+            if only.is_some() { files.len() } else { found.total_matched.max(files.len()) };
+        files.truncate(FILE_LIMIT);
 
         // The empty query paints the frecency-ranked Files group alone: an empty grep is
         // engine-defined noise, not something the spec describes.
@@ -162,31 +171,51 @@ impl Engine {
             return Ok(SearchResults { files, code: Vec::new(), file_total, code_more: false });
         }
 
-        let mut grep = picker.grep(
-            &query,
-            &GrepSearchOptions {
-                page_limit: CODE_LIMIT,
-                time_budget_ms: GREP_BUDGET_MS,
-                ..Default::default()
-            },
-        );
-        // Drop each match line's leading indentation so the row text aligns at the left in
-        // the narrow pane; the engine adjusts its match offsets as it trims. The preview
-        // keeps the true indentation.
-        for m in &mut grep.matches {
-            m.trim_leading_whitespace();
-        }
-        let code: Vec<CodeHit> = grep
-            .matches
-            .iter()
-            .map(|m| CodeHit {
-                path: grep.files[m.file_index].relative_path(picker),
-                line: m.line_number,
-                text: m.line_content.clone(),
-                spans: m.match_byte_offsets.iter().copied().collect(),
-            })
-            .collect();
-        let code_more = grep.next_file_offset != 0;
+        // Narrowed, a page can come back with nothing kept, so keep paging until the cap,
+        // the end of the files, or the one budget all pages share.
+        let deadline = Instant::now() + Duration::from_millis(GREP_BUDGET_MS);
+        let mut code: Vec<CodeHit> = Vec::new();
+        let mut offset = 0;
+        let code_more = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
+            let mut grep = picker.grep(
+                &query,
+                &GrepSearchOptions {
+                    file_offset: offset,
+                    page_limit: CODE_LIMIT - code.len(),
+                    time_budget_ms: remaining.max(1),
+                    ..Default::default()
+                },
+            );
+            // Drop each match line's leading indentation so the row text aligns at the left
+            // in the narrow pane; the engine adjusts its match offsets as it trims. The
+            // preview keeps the true indentation.
+            for m in &mut grep.matches {
+                m.trim_leading_whitespace();
+            }
+            code.extend(
+                grep.matches
+                    .iter()
+                    .map(|m| CodeHit {
+                        path: grep.files[m.file_index].relative_path(picker),
+                        line: m.line_number,
+                        text: m.line_content.clone(),
+                        spans: m.match_byte_offsets.iter().copied().collect(),
+                    })
+                    .filter(|hit| keep(&hit.path)),
+            );
+            let next = grep.next_file_offset;
+            // An unnarrowed query is one page, as before; a page that made no progress
+            // (the budget ran out on its first file) must not spin.
+            if only.is_none()
+                || next <= offset
+                || code.len() >= CODE_LIMIT
+                || Instant::now() >= deadline
+            {
+                break next != 0;
+            }
+            offset = next;
+        };
 
         Ok(SearchResults { files, code, file_total, code_more })
     }
@@ -231,7 +260,7 @@ pub fn spawn(
                 }
             };
             // The query awaiting a warm index, re-run when the scan lands.
-            let mut pending: Option<(u64, String)> = None;
+            let mut pending: Option<(u64, String, Option<HashSet<String>>)> = None;
             loop {
                 let request = if pending.is_some() {
                     match rx.recv_timeout(WARMUP_POLL) {
@@ -248,8 +277,8 @@ pub fn spawn(
                 let mut job = None;
                 if let Some(request) = request {
                     match request {
-                        SearchJob::Query { generation, query } => {
-                            job = Some((generation, query));
+                        SearchJob::Query { generation, query, only } => {
+                            job = Some((generation, query, only));
                         }
                         SearchJob::Track { path } => engine.track(&path),
                     }
@@ -257,8 +286,8 @@ pub fn spawn(
                 // Latest keystroke wins: drain the queue before running anything.
                 while let Ok(next) = rx.try_recv() {
                     match next {
-                        SearchJob::Query { generation, query } => {
-                            job = Some((generation, query));
+                        SearchJob::Query { generation, query, only } => {
+                            job = Some((generation, query, only));
                         }
                         SearchJob::Track { path } => engine.track(&path),
                     }
@@ -268,16 +297,16 @@ pub fn spawn(
                 if job.is_some() {
                     pending = None;
                 }
-                let Some((generation, query)) = job.or_else(|| pending.take()) else {
+                let Some((generation, query, only)) = job.or_else(|| pending.take()) else {
                     continue;
                 };
                 if !engine.warm() {
-                    pending = Some((generation, query));
+                    pending = Some((generation, query, only));
                     let outcome = SearchOutcome::Indexing;
                     let _ = tx.send(SearchCompletion { generation, outcome });
                     continue;
                 }
-                let outcome = match engine.run(&query) {
+                let outcome = match engine.run(&query, only.as_ref()) {
                     Ok(results) => SearchOutcome::Ready(results),
                     Err(e) => SearchOutcome::Failed(e),
                 };

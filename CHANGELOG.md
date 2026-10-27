@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Mark a run of files at once.** `v` in the **Changes** file list starts a range, `j` / `k`
+  extend it, and `a` marks every file in it (or unmarks them, when all are already marked);
+  `A` unmarks the lot. A collapsed directory in the range brings every file under it. `esc`
+  drops the range.
+
+### Changed
+- **`/` from `Changes` searches only the changed files.** Both the file and the code results keep
+  to the active scope's changeset, so on `unstaged` it searches what you have not reviewed yet.
+  `All files` still searches the whole worktree.
+- **Marking a file in `unstaged` takes effect at once.** `a` drops the file from the queue and moves
+  to the next one in the same frame, and `A` redraws the diff from `HEAD` immediately, instead of
+  both waiting for the background refresh.
+
 ## [0.38.0] — 2026-09-07
 
 ### Changed

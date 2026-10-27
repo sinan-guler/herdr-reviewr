@@ -5206,7 +5206,9 @@ mod search_overlay {
         let (res_tx, res_rx) = std::sync::mpsc::channel();
         let worker =
             herdr_reviewr::search::spawn(repo.path_buf(), cache.path().into(), job_rx, res_tx);
-        job_tx.send(SearchJob::Query { generation: 1, query: "alpha_marker".into() }).unwrap();
+        job_tx
+            .send(SearchJob::Query { generation: 1, query: "alpha_marker".into(), only: None })
+            .unwrap();
 
         // A warming engine answers `indexing…` first and re-runs by itself.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -5251,6 +5253,74 @@ mod search_overlay {
             cache.path().join("frecency").exists(),
             "the frecency store lives under the cache dir"
         );
+    }
+
+    /// One query through a fresh worker, waited past warm-up: every path either group hit.
+    fn search_paths(
+        repo: &Repo,
+        query: &str,
+        only: Option<std::collections::HashSet<String>>,
+    ) -> Vec<String> {
+        let cache = tempfile::TempDir::new().unwrap();
+        let (job_tx, job_rx) = std::sync::mpsc::channel();
+        let (res_tx, res_rx) = std::sync::mpsc::channel();
+        let _worker =
+            herdr_reviewr::search::spawn(repo.path_buf(), cache.path().into(), job_rx, res_tx);
+        job_tx.send(SearchJob::Query { generation: 1, query: query.into(), only }).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let results = loop {
+            match res_rx.recv_timeout(deadline - std::time::Instant::now()).unwrap().outcome {
+                SearchOutcome::Ready(results) => break results,
+                SearchOutcome::Indexing => {}
+                SearchOutcome::Failed(e) => panic!("the engine failed: {e}"),
+            }
+        };
+        let files = results.files.into_iter().map(|f| f.path);
+        files.chain(results.code.into_iter().map(|c| c.path)).collect()
+    }
+
+    /// Every file carries the marker; only `zz/changed.rs` differs from `HEAD`. The 250
+    /// unchanged hits outnumber the code cap, so a filter applied after it would lose the one
+    /// that matters.
+    fn marker_repo() -> Repo {
+        let repo = Repo::init();
+        repo.write("zz/changed.rs", "marker_one\n");
+        for i in 0..250 {
+            repo.write(&format!("still/{i:03}.rs"), "marker_one\n");
+        }
+        repo.commit_all("c");
+        repo.write("zz/changed.rs", "marker_one\nmarker_two\n");
+        repo
+    }
+
+    #[test]
+    fn search_from_changes_keeps_only_the_changed_files() {
+        let repo = marker_repo();
+        let only = std::collections::HashSet::from(["zz/changed.rs".to_string()]);
+        let paths = search_paths(&repo, "marker", Some(only));
+        assert!(paths.iter().any(|p| p == "zz/changed.rs"), "the changed file hits: {paths:?}");
+        assert!(paths.iter().all(|p| p == "zz/changed.rs"), "nothing else does: {paths:?}");
+    }
+
+    #[test]
+    fn search_from_all_files_spans_the_worktree() {
+        let paths = search_paths(&marker_repo(), "marker", None);
+        assert!(
+            paths.iter().any(|p| p.starts_with("still/")),
+            "an unchanged file hits too: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn the_search_universe_follows_the_tab() {
+        let repo = marker_repo();
+        let mut app = app_on(&repo);
+        assert_eq!(
+            app.search_only(),
+            Some(std::collections::HashSet::from(["zz/changed.rs".to_string()]))
+        );
+        enter_tab(&mut app, Tab::AllFiles);
+        assert_eq!(app.search_only(), None, "`All files` searches the worktree");
     }
 }
 
@@ -7531,11 +7601,35 @@ fn marking_a_file_drops_it_from_the_unstaged_scope() {
     assert_eq!(app.changed_count(), 2, "both files await review");
 
     press(&mut app, &keymap, KeyCode::Char('a'));
-    common::land_world(&mut app);
 
+    // On the keypress's own frame, not when the refresh lands.
     assert_eq!(app.changed_count(), 1, "the reviewed file left the queue");
     assert_eq!(mark_of(&app, "a.rs"), None);
+    assert_eq!(app.diff_path.as_deref(), Some("b.rs"), "the cursor moved on to the next file");
+
+    common::land_world(&mut app);
+    assert_eq!(app.changed_count(), 1, "the refresh agrees");
     assert!(mark_of(&app, "b.rs").is_some());
+}
+
+#[test]
+fn unmarking_in_the_unstaged_scope_rebuilds_the_diff_at_once() {
+    // The index side falls back to `HEAD`, so the diff regains the lines the mark had hidden
+    // on the keypress's own frame, not when the refresh lands.
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    r.write("a.rs", "three\n");
+    press(&mut app, &keymap, KeyCode::Char('i'));
+    assert_eq!(app.diff_path.as_deref(), Some("a.rs"));
+    let shows = |app: &App, text: &str| app.visible.iter().any(|row| row.text() == text);
+    assert!(!shows(&app, "one"), "the diff starts at the staged side");
+
+    press(&mut app, &keymap, KeyCode::Char('A'));
+
+    assert!(shows(&app, "one"), "the diff now starts at HEAD");
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::No));
 }
 
 #[test]
@@ -7622,4 +7716,129 @@ fn the_review_keys_rebind() {
 
     press(&mut app, &keymap, KeyCode::Char('x'));
     assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "a.rs");
+}
+
+#[test]
+fn marking_the_last_file_in_the_unstaged_scope_stays_at_the_bottom() {
+    // The cursor holds its place: the row that took the marked file's slot, or — when the
+    // marked file was the last one — the one above it, never a jump back to the top.
+    for dir in ["", "src/"] {
+        let r = Repo::init();
+        let names: Vec<String> =
+            ["a.rs", "b.rs", "c.rs"].iter().map(|n| format!("{dir}{n}")).collect();
+        for n in &names {
+            r.write(n, "one\n");
+        }
+        r.commit_all("init");
+        for n in &names {
+            r.write(n, "two\n");
+        }
+        let mut app = app_on(&r);
+        let keymap = Keymap::default();
+        press(&mut app, &keymap, KeyCode::Char('i'));
+        for _ in 0..=names.len() {
+            press(&mut app, &keymap, KeyCode::Char('j'));
+        }
+        assert_eq!(app.diff_path.as_deref(), Some(names[2].as_str()), "on the last file");
+
+        press(&mut app, &keymap, KeyCode::Char('a'));
+        assert_eq!(app.diff_path.as_deref(), Some(names[1].as_str()), "the one above, at once");
+        common::land_world(&mut app);
+        assert_eq!(app.diff_path.as_deref(), Some(names[1].as_str()), "and after the refresh");
+    }
+}
+
+// --- Navigator range select ------------------------------------
+
+/// `v` on the first file, `j` onto the second: a two-file range.
+fn range_over_both(app: &mut App, keymap: &Keymap) {
+    app.file_cursor = app.file_rows.iter().position(|r| r.file_index().is_some()).unwrap();
+    press(app, keymap, KeyCode::Char('v'));
+    press(app, keymap, KeyCode::Char('j'));
+}
+
+#[test]
+fn a_range_marks_every_file_in_it() {
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    range_over_both(&mut app, &keymap);
+    assert!(app.file_row_selected(0) && app.file_row_selected(1), "both rows paint selected");
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "a.rs\nb.rs");
+    assert_eq!(mark_of(&app, "a.rs"), Some(Staged::Yes));
+    assert_eq!(mark_of(&app, "b.rs"), Some(Staged::Yes));
+    assert!(app.status.contains("2 files"), "status counts the set: {}", app.status);
+    assert!(!app.file_row_selected(0), "the keypress consumes the range");
+}
+
+#[test]
+fn a_wholly_marked_range_unmarks() {
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    range_over_both(&mut app, &keymap);
+    press(&mut app, &keymap, KeyCode::Char('a'));
+    range_over_both(&mut app, &keymap);
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "", "the set comes back off");
+}
+
+#[test]
+fn a_collapsed_directory_in_the_range_marks_its_files() {
+    let r = Repo::init();
+    for path in ["dir/x.rs", "dir/y.rs", "top.rs"] {
+        r.write(path, "one\n");
+    }
+    r.commit_all("init");
+    for path in ["dir/x.rs", "dir/y.rs", "top.rs"] {
+        r.write(path, "two\n");
+    }
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    app.file_cursor = app.file_rows.iter().position(|r| r.dir_path() == Some("dir")).unwrap();
+    press(&mut app, &keymap, KeyCode::Left);
+    assert_eq!(app.file_rows.len(), 2, "the directory collapsed over its files");
+
+    press(&mut app, &keymap, KeyCode::Char('v'));
+    press(&mut app, &keymap, KeyCode::Char('j'));
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(r.git(&["diff", "--cached", "--name-only"]).trim(), "dir/x.rs\ndir/y.rs\ntop.rs");
+}
+
+#[test]
+fn esc_drops_the_file_range() {
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    range_over_both(&mut app, &keymap);
+
+    press(&mut app, &keymap, KeyCode::Esc);
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(
+        r.git(&["diff", "--cached", "--name-only"]).trim(),
+        "b.rs",
+        "only the cursor's file is marked"
+    );
+}
+
+#[test]
+fn a_range_drains_from_the_unstaged_queue() {
+    let r = review_repo();
+    let mut app = app_on(&r);
+    let keymap = Keymap::default();
+    press(&mut app, &keymap, KeyCode::Char('i'));
+    range_over_both(&mut app, &keymap);
+
+    press(&mut app, &keymap, KeyCode::Char('a'));
+
+    assert_eq!(app.changed_count(), 0, "both left the queue on the keypress's own frame");
+    common::land_world(&mut app);
+    assert_eq!(app.changed_count(), 0, "and the refresh agrees");
 }

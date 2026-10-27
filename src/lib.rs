@@ -1084,7 +1084,11 @@ fn event_loop(
                 search_generation = search_generation.wrapping_add(1);
                 let query = app.search.as_ref().map(|s| s.query.clone()).unwrap_or_default();
                 search_inflight = tx
-                    .send(crate::search::SearchJob::Query { generation: search_generation, query })
+                    .send(crate::search::SearchJob::Query {
+                        generation: search_generation,
+                        query,
+                        only: app.search_only(),
+                    })
                     .is_ok();
                 if !search_inflight
                     && let Some(s) = app.search.as_mut()
